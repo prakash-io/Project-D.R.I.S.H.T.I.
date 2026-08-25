@@ -1,0 +1,385 @@
+# D.R.I.S.H.T.I. data manifest
+#
+# The single source of truth for every dataset the platform needs.
+# `scripts/check_data.py` reads this file to report what is present or missing,
+# so keep `path` accurate — it is the contract, not documentation.
+#
+# Every `rows`, `columns`, `geometry`, and `crs` below was read off the actual
+# file, not copied from the spec. Where the two disagree the file wins, and the
+# discrepancy is called out in `spec_says`.
+#
+# Conventions (project decisions, applied to everything below):
+#   - Vector CRS is EPSG:4326 on the wire and in PostGIS.
+#     Reproject on ingest, never at query time.
+#   - Rasters are already EPSG:4326 here; rasterio still handles the transform.
+#   - `raw/` is immutable. Never write to it from a script.
+#   - Anything in `processed/` or `artifacts/` must be rebuildable from `raw/`.
+
+version: 2
+source: >
+  Google Drive folder CLEAN_READY_DATA, downloaded 2026-08-25. Drive split the
+  export into six part-folders; they were a partition (0 overlapping paths,
+  verified by relpath) and have been merged. Provenance upstream of the Drive
+  folder is unrecorded — see the `source:` field on each entry.
+
+datasets:
+  # ================================================================ Epic 1 / DB-02
+  # GeoPandas -> PostGIS import. Builds the pgRouting topology.
+  - id: road_network
+    path: data/raw/geo/road_network.parquet
+    format: geoparquet
+    rows: 238170
+    geometry: [MultiLineString, GeometryCollection]
+    crs: EPSG:4326
+    consumed_by: [DB-02]
+    loads_into: road_edges
+    required: true
+    source: OSM extract (tags preserved), via CLEAN_READY_DATA/02
+    columns: [id, name, highway, surface, smoothness, maxspeed, bridge,
+              tunnel, ford, cutting, embankment, incline, lanes, geometry]
+    spec_says: LineString
+    notes: >
+      TWO INGEST HAZARDS, both silent if unhandled:
+
+      1. Geometry is MultiLineString with some GeometryCollection. road_edges
+         declares LINESTRING, so a raw COPY fails. Ingest must ST_Dump to
+         single parts and drop non-linear members of the collections. One
+         source row therefore becomes N edges — `id` is NOT unique after
+         dumping and cannot be the primary key.
+
+      2. There is no source/target/cost/reverse_cost. Topology does not exist
+         yet and must be built with pgr_createTopology after import; cost has
+         to be derived (ST_Length(geom::geography), optionally weighted by
+         `highway` class and `surface`).
+
+  - id: bridges
+    path: data/raw/geo/bridges.parquet
+    format: geoparquet
+    rows: 12305
+    geometry: MultiLineString
+    crs: EPSG:4326
+    consumed_by: [DB-02]
+    required: true
+    source: OSM extract (bridge=yes subset of the road network)
+    columns: same 13 OSM tag columns as road_network
+    spec_says: Point
+    notes: >
+      These are bridge road *segments*, not point features — same schema as
+      road_network, filtered to bridge tags. Treat as a road_edges attribute
+      (is_bridge) rather than a separate layer. Flood risk on one blocks the
+      edge outright.
+
+  - id: districts
+    path: data/raw/geo/districts.parquet
+    format: geoparquet
+    rows: 88
+    geometry: [Polygon, MultiPolygon]
+    crs: EPSG:4326
+    consumed_by: [DB-02]
+    required: true
+    source: Census of India district boundaries
+    columns: [DISTRICT, ST_NM, ST_CEN_CD, DT_CEN_CD, censuscode,
+              geometry, state_name, district_name]
+    notes: >
+      Admin boundaries for dashboard filtering and alert scoping.
+      DISTRICT/ST_NM are the raw census spellings; state_name/district_name
+      are the normalised pair — join on the normalised ones.
+
+  - id: hazard_pinch_points
+    path: data/raw/geo/hazard_pinch_points.parquet
+    format: geoparquet
+    rows: 5818
+    geometry: MultiLineString
+    crs: EPSG:4326
+    consumed_by: [DB-02, WEB-04]
+    required: false
+    source: derived upstream from road_network
+    notes: >
+      Road segments pre-identified as chokepoints — single points of failure
+      where a block has no local detour. Not in the original spec. Useful as a
+      static risk prior on road_edges and as a dashboard overlay.
+
+  - id: landslide_events
+    path: data/raw/geo/landslide_events.parquet
+    format: geoparquet
+    rows: 8130
+    geometry: Point
+    crs: EPSG:4326
+    consumed_by: [ML-04]
+    required: true
+    source: GSI landslide inventory (India)
+    notes: >
+      The positive-class ground truth behind the risk model — 8130 rows here
+      matches LANDSLIDE_RISK=8130 in the training split exactly, so this is
+      what X_train was built from. 38 attribute columns (trigger_cause,
+      material_type, movement_type, lithology, runout_distance_m, ...) that
+      the current 8-feature model does not use.
+
+  # ================================================================ Epic 1 / routing
+  - id: road_graph
+    path: data/raw/graph/ner_road_graph.gpickle
+    format: networkx_pickle
+    size_gb: 1.55
+    consumed_by: [DB-02, MOB-06]
+    required: false
+    source: derived upstream from road_network
+    notes: >
+      Pre-built NetworkX graph of the same 238170 road rows. Redundant with
+      PostGIS routing on the server, but it is the natural seed for the
+      on-device cached road graph used for dark-zone map-matching (MOB-06).
+
+      Pickle executes arbitrary code on load and is bound to the NetworkX
+      version that wrote it — do not load it in the API process. Convert once,
+      offline, to a flat format for the mobile bundle.
+
+      A duplicate of this file shipped as ner_road_graph.pkl (byte-identical,
+      sha256 cf5089d2...) and was deleted; roads.parquet was likewise
+      byte-identical to road_network.parquet (sha256 9408e194...) and deleted.
+
+  # ================================================================ Epic 2 / ML-02
+  - id: terrain_rasters
+    path: data/raw/terrain/
+    format: geotiff
+    count: 27
+    crs: EPSG:4326
+    resolution_m: 30
+    dtype: float32
+    compression: DEFLATE
+    consumed_by: [ML-02, ML-04]
+    required: true
+    source: SRTM/Copernicus-derived DEM plus computed slope and aspect
+    layout: "{region}_{dem|slope|aspect}_epsg4326.tif"
+    regions: [arunachal_pradesh, assam, manipur, meghalaya, mizoram,
+              nagaland, sikkim, siliguri_corridor, tripura]
+    spec_says: a single arunachal_pradesh_30m.tif
+    notes: >
+      NOT one raster — 9 regions x 3 layers, 7.6 GB total. Assam is the
+      largest at 22680x14041 (~1.1 GB per layer).
+
+      Slope and aspect are PROVIDED, not derived at request time. The old
+      note in v1 of this manifest claiming they get computed into
+      processed/landslide was wrong; nothing needs to compute them.
+
+      ML-02 says "load raster handles into API memory on startup" — with 27
+      rasters at 7.6 GB that means rasterio dataset handles only (lazy,
+      windowed reads), never full arrays. Open all 27 once, keep them open,
+      and dispatch a sample to the right region by bounds.
+
+      These are DEFLATE-compressed and striped rather than tiled, so a
+      single-pixel read decompresses a whole strip. If point sampling shows
+      up hot, convert to tiled COGs once rather than caching in-process.
+
+  - id: river_waterways
+    path: data/raw/hydrology/river_waterways.parquet
+    format: geoparquet
+    rows: 131612
+    geometry: [LineString, MultiLineString]
+    crs: EPSG:4326
+    consumed_by: [ML-02]
+    required: true
+    source: HydroRIVERS
+    columns: [HYRIV_ID, MAIN_RIV, DIS_AV_CMS, UPLAND_SKM, ORD_STRA, geometry]
+    spec_says: rivers_waterways.parquet
+    notes: >
+      Filename is river_waterways (singular "river"), not rivers_waterways.
+      Source geometry for the KDTree index below. ORD_STRA (Strahler order)
+      and DIS_AV_CMS (mean discharge) are unused by the current feature set
+      but are the obvious way to weight flood risk by river size later.
+
+  # ================================================================ Epic 2 / ML-05
+  - id: vision_hazard_yolo
+    path: data/raw/vision/incident-yolo
+    format: yolo_dataset
+    layout: "{train,val,test}/{images,labels}/ + data.yaml + dataset_summary.json"
+    images: {train: 965, val: 207, test: 208}
+    consumed_by: [ML-05]
+    required: true
+    source: CLEAN_READY_DATA/05
+    image_size: [640, 640]
+    classes:
+      0: NORMAL_TERRAIN
+      1: FLOODED_ROAD_OR_SUBMERGED
+      2: ACTIVE_LANDSLIDE_DEBRIS
+      3: DAMAGED_BRIDGE_INFRASTRUCTURE
+    spec_says: "3 classes: [landslide, flood, obstruction]"
+    notes: >
+      FOUR classes, not three, and none of the names match the spec. This
+      contradicts the incidents.kind CHECK constraint in migration 001, which
+      allows only ('landslide','flood','obstruction'). Resolve before ML-06:
+      either widen the constraint to cover damaged-bridge and add an explicit
+      "no hazard found" rejection path for NORMAL_TERRAIN, or map 3->
+      obstruction at the API boundary and document the lossy mapping.
+
+      NORMAL_TERRAIN is a real prediction, not a background class: a driver
+      photo scoring class 0 means the report is unverified and must NOT
+      block an edge.
+
+      Class order in data.yaml is load-bearing — YOLO emits indices and the
+      backend maps index -> incident kind. Reordering silently relabels every
+      past incident.
+
+      Class balance is skewed: DAMAGED_BRIDGE_INFRASTRUCTURE has 40 train /
+      3 val / 4 test images. Val at n=3 cannot support a per-class metric —
+      expect that class to be unreliable, and weight or augment it.
+
+      data.yaml `path:` still points at D:/SIH DATA/... from the machine that
+      built it. Rewrite to this directory before training.
+
+  # ================================================================ Epic 4 / MOB-05
+  - id: io_vnbd
+    path: data/raw/imu/IO-VNBD
+    format: csv_timeseries
+    sample_rate_hz: 100
+    consumed_by: [MOB-05]
+    required: true
+    status: PLACEHOLDER — real data not present
+    source: https://github.com/onyekpeu/IO-VNBD (GitHub archive download)
+    notes: >
+      BLOCKER. All 564 CSVs are 132-byte Git LFS pointer files, not data —
+      a GitHub "Download ZIP" does not resolve LFS. The two archives inside
+      (Synchronised / Unsynchronised) are likewise 134-byte pointers standing
+      in for ~200 MB each. Only README_1.pdf is real.
+
+      Fix: `git lfs install && git clone https://github.com/onyekpeu/IO-VNBD`,
+      or fetch the release archives directly. Verify by file size, not by
+      file count — the tree looks complete.
+
+      Trains the 1D-CNN mapping IMU vibration windows -> forward velocity.
+      Must be resampled to the phone's actual 100 Hz IMU cadence before
+      windowing.
+
+  # ================================================================= processed
+  - id: landslide_features
+    path: data/processed/landslide/
+    format: parquet
+    consumed_by: [ML-04]
+    required: true
+    source: derived upstream from landslide_events + terrain_rasters + river_waterways
+    files:
+      X_train.parquet: 15536 rows
+      X_val.parquet:    3329 rows
+      X_test.parquet:   3330 rows
+      y_train.parquet: 15536 rows
+      y_val.parquet:    3329 rows
+      y_test.parquet:   3330 rows
+      features_metadata.json: feature order, scaler params, class distribution
+    spec_says: X_train_2.parquet / y_train_2.parquet
+    columns_X:
+      # 10 columns. The first two are passed through UNSCALED.
+      - latitude
+      - longitude
+      # the 8 scaled features, in this exact order
+      - elevation_m
+      - slope_deg
+      - aspect_deg
+      - dist_to_river_m
+      - dist_to_road_m
+      - rainfall_72h_mm
+      - rainfall_24h_mm
+      - rainfall_intensity_mmh
+    columns_y: [is_hazard, hazard_type, hazard_label]
+    class_distribution:
+      LANDSLIDE_RISK: 8130
+      SAFE_TERRAIN: 8065
+      FLOOD_RISK: 6000
+    notes: >
+      No "_2" suffix, and there is a val split the spec never mentioned —
+      use it, do not tune on test.
+
+      X has 10 columns but the scaler takes 8. latitude/longitude are
+      deliberately unscaled and must be excluded from the transform; passing
+      all 10 to the scaler raises, passing the scaled 8 in the wrong order
+      does not. Order is load-bearing in both directions.
+
+      Feature names differ from the spec's guess: rainfall is 24h/72h plus an
+      intensity term (mm/h), NOT rainfall_1h. Open-Meteo queries in ML-03
+      must produce exactly these three aggregates.
+
+      The target is 3-class (hazard_type), not binary — the spec's "Landslide
+      Risk Probability Score (0-1)" is either P(is_hazard) or
+      P(hazard_type == LANDSLIDE_RISK), and flood and landslide risk are
+      distinguishable. Pick one and pin it: WEB-04's >0.85 red threshold and
+      the ML-06 response contract must agree on which probability they mean.
+
+  - id: spatial_indices
+    path: data/processed/indices/
+    format: pickle_kdtree
+    consumed_by: [ML-02]
+    required: true
+    source: derived upstream
+    files:
+      river_waterways_spatial_index.pkl:    {points: 450860, mb: 54.6}
+      hazard_pinch_points_spatial_index.pkl: {points: 609308, mb: 127.5}
+      bridges_spatial_index.pkl:            {points: 28532,  mb: 6.7}
+      indices_metadata.json: build provenance and per-layer geometry validation
+    notes: >
+      scipy KDTree over densified vertices, loaded into FastAPI memory at
+      startup. Three indices, not one — the spec only named the river index.
+
+      Indices are in DEGREES (EPSG:4326). A KDTree query returns Euclidean
+      degree distance, which is not metres and is not uniform across
+      latitude. dist_to_river_m in the training data is in metres, so the
+      serving path must convert the same way the training path did or the
+      feature is silently on a different scale. Confirm before ML-06.
+
+      Pickle is Python- and SciPy-version-sensitive; rebuild rather than move
+      between interpreter versions.
+
+  # ================================================================= artifacts
+  - id: feature_scaler
+    path: data/artifacts/risk/feature_scaler.joblib
+    format: joblib_sklearn
+    consumed_by: [ML-02, ML-04]
+    required: true
+    source: fitted upstream on X_train
+    scaler_class: RobustScaler
+    n_features_in: 8
+    fitted_with: scikit-learn 1.9.0
+    spec_says: StandardScaler, feature_scaler_2.joblib
+    notes: >
+      RobustScaler (median / IQR), NOT StandardScaler — centre and scale are
+      quantile statistics, so anything reimplementing it as (x - mean) / std
+      is wrong. features_metadata.json carries scaler_center and scaler_scale
+      if the pickle ever needs reconstructing without sklearn.
+
+      Pinned to scikit-learn >= 1.9.0. Loading it under 1.7.2 (the current
+      local env) raises InconsistentVersionWarning and is explicitly not
+      guaranteed to score correctly.
+
+      carries feature_names_in_, so pass a DataFrame with the 8 named columns
+      and let sklearn check the order rather than relying on positional order.
+
+  - id: risk_model
+    path: data/artifacts/risk/risk-xgb.ubj
+    format: xgboost_ubj
+    consumed_by: [ML-04, ML-06]
+    required: true
+    status: NOT TRAINED — ML-04 output
+    source: derived
+    notes: >
+      Train on landslide_features. Outputs a probability; >= 0.85 paints the
+      edge red (WEB-04). See the 3-class caveat under landslide_features —
+      decide which probability the threshold applies to.
+
+  - id: incident_model
+    path: data/artifacts/vision/incident-yolov8n.pt
+    format: pytorch_ultralytics
+    consumed_by: [ML-05, ML-06]
+    required: true
+    status: NOT TRAINED — ML-05 output
+    source: derived
+    notes: >
+      YOLOv8 nano, trained on vision_hazard_yolo. Kept nano deliberately —
+      verification runs synchronously in the incident POST path.
+
+  - id: velocity_cnn
+    path: data/artifacts/edge/velocity-cnn.tflite
+    format: tflite
+    consumed_by: [MOB-05, MOB-06]
+    required: true
+    status: NOT TRAINED — blocked on io_vnbd
+    source: derived
+    notes: >
+      The only artifact that leaves the cloud — bundled into the React Native
+      app binary, so size and quantisation are shipping constraints, not
+      tuning knobs.

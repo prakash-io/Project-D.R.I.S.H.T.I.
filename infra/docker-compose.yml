@@ -1,0 +1,44 @@
+services:
+  postgis:
+    # pgrouting/pgrouting bundles PostGIS *and* pgRouting. The plain
+    # postgis/postgis image does NOT ship pgRouting, and `CREATE EXTENSION
+    # pgrouting` in migration 001 will fail against it.
+    # Tag format is <postgres>-<postgis>-<pgrouting>, pinned to exact patches.
+    # PG16 pairs with PostGIS 3.5 upstream -- there is no 16-3.4-3.6 tag.
+    image: pgrouting/pgrouting:16-3.5-3.8.0
+    container_name: drishti-postgis
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-drishti}
+      POSTGRES_USER: ${PGUSER:-drishti}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-drishti}
+    ports:
+      # 5433 on the host, not 5432: the demo_radar stack already binds 5432.
+      # Inside the container Postgres still listens on 5432, so `docker exec`
+      # and any container-to-container link are unaffected by this remap.
+      - "${PGPORT:-5433}:5432"
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-drishti} -d ${PGDATABASE:-drishti}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: drishti-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      # 6380 for the same reason as Postgres above -- demo_radar holds 6379.
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgis-data:
+  redis-data:
