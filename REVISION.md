@@ -17,8 +17,12 @@ reverse-engineer. Newest revision first.
 | Epic | Task | State |
 |---|---|---|
 | 1 | DB-01 PostGIS + pgRouting | ✅ running, migration applied & smoke-tested |
-| 1 | DB-02 GeoPandas → PostGIS ingest | ⬜ next — data probed (see R7 note), not written |
-| 1 | API-01…04 Express / BullMQ / incidents / reroute | ⬜ not started |
+| 1 | DB-02 PostGIS ingest + routing topology | ✅ 486,784 edges / 412,914 nodes, validated — R10 |
+| 1 | API-01 Express + Socket.IO telemetry | ✅ |
+| 1 | API-02 Redis + BullMQ Burst Sync | ✅ idempotent, verified end to end |
+| 1 | API-03 incident report → nearest edge | ✅ gated behind dispatcher approval (Q2) |
+| 1 | API-04 pgr_aStar dynamic rerouting | ✅ 428 ms Guwahati→Shillong |
+| 4 | Mobile offline road graph (SQLite + R*Tree) | ✅ 104 MB, 0.072 ms bbox query |
 | 2 | ML-01 FastAPI service | ✅ running, 35 tests pass |
 | 2 | ML-02 load scaler / indices / rasters | ✅ + built the road index that never shipped |
 | 2 | ML-03 Open-Meteo peak intensity | ✅ live |
@@ -123,6 +127,150 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R10 — 2026-08-26 · Chunk 2: routing topology, backend, Burst Sync, incidents
+
+Epic 1 end to end. `node backend/test/e2e_verify.mjs` walks the whole reactive
+loop and passes.
+
+**Created**: `scripts/ingest_geo.py`, `scripts/build_mobile_extract.py`,
+`backend/migrations/002…007`, `backend/src/**`, `backend/test/e2e_verify.mjs`,
+`backend/README.md`, `data/artifacts/edge/road_graph.sqlite`
+
+**Modified**: `scripts/db_migrate.sh`, `.env.example`, `data/MANIFEST.yml`
+
+**Stack added**: Node 20.19.5, Express 4.21, Socket.IO 4.8, BullMQ 5.34,
+ioredis 5.4, pg 8.13, multer 1.4, undici 7.
+
+### DB-02 — the parquet is not a road network yet
+
+238,170 rows sounds like 238,170 segments. It is not: each row is a
+MultiLineString of individual **2-point segments** — 6,326,609 of them,
+12.65 M vertices, 162,051 km. Loading those as edges is topologically correct
+and useless, because pgr_aStar reads its whole edge set per call.
+
+`scripts/ingest_geo.py` contracts them back into real road links. A vertex is
+a junction when its degree is not 2, or when it joins segments from different
+OSM ways — the latter matters because that is where name and classification
+change, and merging across it would force the edge to inherit attributes from
+an arbitrary side. Result: **486,784 edges over 412,914 nodes**, and that node
+count independently matches the 412,848 junction candidates measured straight
+in SQL before any of this was written.
+
+Validated rather than asserted: 0 invalid geometries, 0 wrong SRID, 0
+degenerate, 0 zero-length; total length reproduces **162,053 km** against the
+162,051 km measured on the raw segments; `source`/`target` match the geometry
+endpoints on every one of the 486,784 edges; all 238,170 ways represented.
+
+**No `oneway` column exists** in this extract — the 13 tag columns do not
+include it — so every edge is loaded bidirectional. That is the honest reading
+of the data and it will route a truck the wrong way up a one-way street.
+Listed as an open question.
+
+### The graph is not one connected piece
+
+1,194 components: the largest holds **96.22%** of nodes, a second holds 1.55%,
+and 1,030 are islands of 2–9 nodes — driveways, service loops, roads clipped
+at the extract boundary.
+
+`nearest_road_node` used to snap a truck onto one of those happily, and
+routing from it returned zero rows, which a caller cannot tell apart from
+"every road is blocked". It now prefers the main component, and `route_astar`
+refuses a cross-component request outright instead of returning an empty path.
+
+### Six migrations, five of them fixing something the data exposed
+
+`db_migrate.sh` first needed a `schema_migrations` ledger: it applied every
+migration on every run and none are idempotent, so re-running it failed on
+`CREATE TABLE trucks` and it only ever worked against a fresh volume. It now
+skips applied migrations and **refuses to skip one whose contents changed**,
+which is what made the next three fixes fix-forward rather than edits.
+
+* **002** — `is_bridge`/`highway`/`length_m`, the districts table, and the
+  `pending_dispatcher_approval` incident status the Q2 decision requires.
+* **003** — connected components and a corridor-bounded A*.
+* **004** — dropping a stale `route_astar`. Adding a parameter to
+  `CREATE OR REPLACE FUNCTION` creates an **overload**, not a replacement, and
+  every existing 2-argument call became `function ... is not unique`.
+* **005** — `route_astar` rewritten without a temp table. A `STABLE` function
+  may not create one, so every call failed at run time; it uses an array of a
+  composite type now.
+* **006** — the significant one, below.
+* **007** — a regression 003 introduced, caught by the existing smoke test:
+  nodes with no component yet made `nearest_road_node` return NULL, so a
+  freshly ingested graph reported "road graph is empty". The preference is now
+  a preference, with a fallback.
+
+### The routing view was the bottleneck, not the search
+
+Scanning `routable_edges` cost **1,866 ms** against 140 ms for `road_edges` —
+paid on every reroute, with zero incidents in the table. The cause was shape,
+not data: 001's `LEFT JOIN LATERAL` is correlated, so it ran 486,784 times to
+discover that nothing is blocked. The blocking set is tiny and independent of
+the edge, so it is gathered once and hash-joined.
+
+| | before | after |
+|---|---|---|
+| `routable_edges` scan | 1,866 ms | **143 ms** |
+| Guwahati → Shillong | 2,888 ms | **428 ms** |
+| short urban hop | 330 ms | **143 ms** |
+
+Routes are unchanged and sensible: Guwahati → Shillong 296 edges / 95.2 km,
+Guwahati → Imphal 1,086 edges / 447.8 km, both close to real road distances.
+All 7 original smoke tests still pass against the populated graph.
+
+### SQLite + R*Tree, not SpatiaLite
+
+The plan asks for a SpatiaLite extract for the mobile map-matcher. This is
+plain SQLite with an R*Tree index instead, because **React Native's SQLite
+does not load `mod_spatialite`** — WatermelonDB runs on the stock sqlite the
+OS ships. A SpatiaLite file would need a native extension bundled and loaded
+on both platforms, and if it failed to load the map-matcher would fail exactly
+when the truck is in a valley with no network.
+
+R*Tree is compiled into stock SQLite on both platforms and answers the only
+spatial question the app asks. Measured: **0.072 ms** for a 2 km bounding box
+returning 525 of 486,784 edges, with the query plan confirming the index is
+used.
+
+104 MB for the full network at ~11 m simplification. Major roads only
+(`--highway trunk primary secondary tertiary …`) is 23.8 MB / 93,520 edges if
+bundle size matters more than last-mile coverage.
+
+### Backend
+
+Express + Socket.IO for live telemetry, BullMQ for Burst Sync, both over the
+same pg pool. The worker runs as its own process on purpose: draining a few
+thousand dark-zone points would otherwise stall every other truck's live
+stream, which is the whole reason the queue exists.
+
+Three bugs the end-to-end check caught, all mine:
+
+* `/routes/plan` 404'd — the router was mounted at `/` with a `/plan` path.
+* The worker reported **0/250 written** on a batch it had fully persisted. It
+  was counting marker moves, and a burst-synced point is normally *older* than
+  the live fix that arrived on reconnect, so it is correctly written while
+  correctly not moving the truck. Two outcomes, now reported separately.
+* A SQL comment inside a JS template literal contained backticks around a
+  table name, which terminated the string early.
+
+### Verification
+
+    [1] trip Guwahati -> Shillong planned, 95.2 km
+    [2] telemetry packet acked over Socket.IO, broadcast, persisted
+    [3] 250-point backlog -> 202 Accepted, worker drained 250/250;
+        replaying the same batch wrote 0 more rows (idempotent)
+    [4] landslide photo on NH37 edge 150110 -> ACTIVE_LANDSLIDE_DEBRIS 1.000
+        road NOT blocked, status pending_dispatcher_approval, route unchanged
+    [5] dispatcher approves -> 95,164 m -> 95,171 m (+7 m detour around a
+        104 m edge), blocked edge absent from the new route,
+        driver received route_updated over Socket.IO
+    [6] cleared -> restored to 95,164 m exactly, road_edges.cost never mutated
+
+Step 4 is the Q2 decision working: a model at 1.000 confidence does not close
+a highway.
 
 ---
 

@@ -625,6 +625,38 @@ datasets:
       Kept nano deliberately: verification runs synchronously in the incident
       POST path, and it measures 0.4 ms/image on M2 MPS.
 
+  - id: mobile_road_graph
+    path: data/artifacts/edge/road_graph.sqlite
+    format: sqlite_rtree
+    consumed_by: [MOB-06]
+    required: false
+    trained_on: null
+    source: scripts/build_mobile_extract.py, from PostGIS road_edges
+    edges: 486784
+    size_mb: 104
+    notes: >
+      SQLite + R*Tree, NOT SpatiaLite, and the deviation is deliberate:
+      React Native's SQLite does not load mod_spatialite. WatermelonDB runs on
+      the stock sqlite the OS ships, so a SpatiaLite file would need a native
+      extension bundled and loaded on both platforms — and if it failed to
+      load, the map-matcher would fail exactly when the truck is in a valley
+      with no network. R*Tree is compiled into stock SQLite on iOS and Android
+      and answers the only spatial question the app asks.
+
+      Geometry is WKB LineString in a BLOB, EPSG:4326, simplified with
+      ST_SimplifyPreserveTopology at 1e-4 deg (~11 m). That cannot collapse a
+      line below two points or move an endpoint, so the graph stays connected
+      and source/target stay valid. 11 m is far below the error it corrects:
+      the IDR speed model's 4.0 m/s MAE integrates to ~240 m of along-track
+      drift per minute of blackout.
+
+      Measured: a 2 km bounding box returns 525 of 486,784 edges in 0.072 ms,
+      with EXPLAIN QUERY PLAN confirming the R*Tree is used.
+
+      104 MB for the full network. Major roads only (--highway trunk primary
+      secondary tertiary + links) is 23.8 MB / 93,520 edges, if bundle size
+      matters more than last-mile coverage.
+
   - id: velocity_cnn
     path: data/artifacts/edge/speed_model.tflite
     format: tflite
