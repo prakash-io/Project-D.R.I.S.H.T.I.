@@ -452,6 +452,51 @@ datasets:
       Pickle is Python- and SciPy-version-sensitive; rebuild rather than move
       between interpreter versions.
 
+  - id: landslide_features_rebuilt
+    path: data/processed/landslide_rebuilt/
+    format: parquet_splits
+    consumed_by: [ML-04]
+    required: true
+    rows: 17783
+    source: scripts/rebuild_hazard_features.py, from landslide_features (R9)
+    rebuilt_columns: [slope_deg, aspect_deg]
+    relabelled: true
+    files:
+      X_train.parquet: 8 scaled features + raw latitude/longitude
+      X_val.parquet: same schema
+      X_test.parquet: same schema
+      y_train.parquet: is_hazard, hazard_type, hazard_label
+      y_val.parquet: same schema
+      y_test.parquet: same schema
+      rebuild_meta.json: row counts, correlations, and the recovered rule
+    notes: >
+      THIS is what ML-04 trains on. The shipped landslide_features table is
+      kept untouched as the historical record; it must not be trained from.
+
+      slope_deg and aspect_deg are re-sampled from the terrain GeoTIFFs at
+      each row's own lat/lon, so they now correlate 1.000 with what the
+      service computes (0.309 and -0.018 before). The scaler is NOT refitted —
+      the service loads that exact artefact, and refitting would put training
+      and serving back out of agreement. Those two columns therefore no longer
+      have median 0 / IQR 1, which is expected.
+
+      4,247 rows (19.1%) were dropped because they fall outside every terrain
+      sheet, so no real slope exists for them. A further 165 were dropped
+      because the rebuild CREATED leakage: replacing slope/aspect collapses
+      coordinates differing only in those columns into identical feature
+      vectors, and 88 test + 77 val rows then matched a train row. The
+      originals had none of this.
+
+      RELABELLED, and this is the part that matters. The labels were generated
+      from the OLD slope, so carrying them onto real terrain unchanged inverts
+      the model: mean slope per class went FLOOD 1.4->16.5, SAFE 8.1->17.0,
+      LANDSLIDE 32.0->27.6, real slope predicted the label at 0.545 (from
+      0.934), and the model called a 1.8 deg valley floor LANDSLIDE_RISK while
+      still scoring 0.907 against those broken labels. The dataset's own rule
+      was recovered by fitting a depth-6 tree on the ORIGINAL raw features
+      against the ORIGINAL labels (held-out fidelity 0.9845) and re-applied to
+      the rebuilt features. No threshold is hand-chosen.
+
   # ================================================================= artifacts
   - id: feature_scaler
     path: data/artifacts/risk/feature_scaler.joblib
@@ -485,18 +530,19 @@ datasets:
     # and check_data.py treats any value as a blocker. Training dates belong
     # in trained_on.
     trained_on: 2026-08-25
-    source: scripts/train_hazard_xgb.py, trained on landslide_features
+    source: scripts/train_hazard_xgb.py, trained on landslide_features_rebuilt
     trained_by: scripts/train_hazard_xgb.py
     spec_says: risk-xgb.ubj
     files:
       hazard_model.json: multi:softprob booster, 891 KB
       hazard_model_meta.json: feature order, class order, held-out metrics
-    architecture: 3-class multi:softprob, depth 6, 69 trees (early-stopped)
+    architecture: 3-class multi:softprob, depth 6, 86 trees (early-stopped)
+    feature_source: rebuilt_from_rasters
     accuracy:
-      test_accuracy: 0.9913
-      test_logloss: 0.0625
-      roc_auc_hazard: 0.9997
-      roc_auc_landslide: 0.9999
+      test_accuracy: 0.9942
+      roc_auc_hazard: 0.9996
+      roc_auc_landslide: 1.0000
+      depth_2_tree_baseline: 0.9290
     notes: >
       THE 0.85 QUESTION IS RESOLVED by making it moot: the model is 3-class,
       so the response carries per-class probabilities AND
@@ -511,12 +557,18 @@ datasets:
       rule is slope_deg > ~15 deg -> LANDSLIDE_RISK, dist_to_river_m < ~800 m
       -> FLOOD_RISK, else SAFE_TERRAIN.
 
-      Worse than the labels: the feature the model leans on hardest is
-      fabricated — see the R8 note under landslide_features. The model is NOT
-      usable as a calibrated hazard probability on live inputs, and the
-      service says so on every response via `trustworthy: false`.
+      R9 — RETRAINED ON landslide_features_rebuilt. The fabricated slope and
+      aspect are gone: both now correlate 1.000 with what the service computes,
+      the labels were re-derived with the dataset's own recovered rule, and
+      /predict-hazard reports `trustworthy: true` again.
 
-      Validating against real landslide outcomes is a separate, unstarted job.
+      Physical sanity, which accuracy alone did not catch: 44.6 deg at 4061 m
+      -> LANDSLIDE_RISK 0.957; 4.8 deg on the Brahmaputra floodplain ->
+      FLOOD_RISK 0.968; 1.8 deg valley floor -> SAFE_TERRAIN 0.126.
+
+      Still a demonstrator: the model recovers a threshold rule, it does not
+      forecast landslides. Validating against real landslide outcomes is a
+      separate, unstarted job.
 
       The pipeline itself is sound: no row overlap between splits (checked),
       early stopping on val, test never used for selection.

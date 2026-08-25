@@ -52,6 +52,9 @@ from sklearn.tree import DecisionTreeClassifier, export_text
 
 ROOT = Path(__file__).resolve().parent.parent
 SPLIT_DIR = ROOT / "data" / "processed" / "landslide"
+#: Default. slope_deg/aspect_deg re-sampled from the GeoTIFFs so that training
+#: and serving agree on the physical inputs -- see rebuild_hazard_features.py.
+REBUILT_SPLIT_DIR = ROOT / "data" / "processed" / "landslide_rebuilt"
 SCALER_PATH = ROOT / "data" / "artifacts" / "risk" / "feature_scaler.joblib"
 OUT_MODEL = ROOT / "data" / "artifacts" / "risk" / "hazard_model.json"
 
@@ -82,33 +85,61 @@ NUM_ROUNDS = 2000
 EARLY_STOPPING = 60
 
 
-def load_split(name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    X = pd.read_parquet(SPLIT_DIR / f"X_{name}.parquet")
-    y = pd.read_parquet(SPLIT_DIR / f"y_{name}.parquet")
+def load_split(name: str, split_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    X = pd.read_parquet(split_dir / f"X_{name}.parquet")
+    y = pd.read_parquet(split_dir / f"y_{name}.parquet")
     if len(X) != len(y):
         sys.exit(f"error: X_{name} has {len(X)} rows but y_{name} has {len(y)}")
     return X, y
 
 
-def assert_prescaled(X: pd.DataFrame, features: list[str]) -> None:
-    """Fail loudly if the parquet is raw units rather than scaler output.
+#: Physically possible ranges, in real units. Deliberately generous -- this
+#: distinguishes "scaled" from "raw", not "plausible" from "unusual".
+PHYSICAL_RANGE = {
+    "elevation_m": (-500.0, 9000.0),
+    "slope_deg": (0.0, 90.0),
+    "aspect_deg": (0.0, 360.0),
+    "dist_to_river_m": (0.0, 2_000_000.0),
+    "dist_to_road_m": (0.0, 2_000_000.0),
+    "rainfall_72h_mm": (0.0, 5_000.0),
+    "rainfall_24h_mm": (0.0, 5_000.0),
+    "rainfall_intensity_mmh": (0.0, 1_000.0),
+}
 
-    RobustScaler centres on the median, so every scaled column must have a
-    training median of 0 and an IQR of 1. Checking that is a far stronger
-    guard than eyeballing magnitudes: raw `elevation_m` would show a median of
-    ~508, and raw `aspect_deg` ~179, either of which trips this immediately.
+
+def assert_prescaled(X: pd.DataFrame, features: list[str], scaler) -> None:
+    """Fail loudly if the parquet holds raw units rather than scaler output.
+
+    The obvious check -- median 0, IQR 1, which is what RobustScaler produces
+    -- only holds for the exact rows the scaler was fitted on. It breaks the
+    moment a subset is trained on: dropping the 19% of rows that fall off the
+    terrain sheets shifts every surviving quantile, and a guard that fires on
+    correctly-scaled data is a guard that gets deleted.
+
+    This instead inverse-transforms and asks whether the result is physically
+    possible. It is distribution-independent, so it survives subsetting, and
+    it is far more decisive on the failure it exists to catch: a file that is
+    already in raw units inverse-transforms `elevation_m` to roughly
+    508 + 508 x 830 = 421,000 m, which is not a mountain.
     """
-    med = X[features].median()
-    iqr = X[features].quantile(0.75) - X[features].quantile(0.25)
-    bad_med = med[med.abs() > 1e-6]
-    bad_iqr = iqr[(iqr - 1.0).abs() > 1e-6]
-    if len(bad_med) or len(bad_iqr):
-        sys.exit(
-            "error: the feature columns are not RobustScaler output.\n"
-            f"  non-zero medians: {bad_med.to_dict()}\n"
-            f"  non-unit IQRs:    {bad_iqr.to_dict()}\n"
-            "  If the split files were regenerated in raw units, the scaler "
-            "must be applied here AND the service's assumption revisited."
+    raw = pd.DataFrame(scaler.inverse_transform(X[features].to_numpy()),
+                       columns=features)
+    problems = []
+    for name in features:
+        low, high = PHYSICAL_RANGE.get(name, (float("-inf"), float("inf")))
+        column = raw[name]
+        if column.min() < low or column.max() > high:
+            problems.append(
+                f"    {name}: inverse-transforms to "
+                f"[{column.min():,.1f}, {column.max():,.1f}], outside the "
+                f"physically possible [{low:,.1f}, {high:,.1f}]"
+            )
+    if problems:
+        raise SystemExit(
+            "error: these columns do not look like scaler output --\n"
+            + "\n".join(problems)
+            + "\n  If the split files were regenerated in RAW units, the scaler "
+              "must be applied here AND the service's assumption revisited."
         )
 
 
@@ -161,7 +192,21 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=OUT_MODEL)
+    ap.add_argument("--split-dir", type=Path, default=REBUILT_SPLIT_DIR,
+                    help="defaults to the raster-rebuilt splits; pass "
+                         "data/processed/landslide for the original synthetic ones")
     args = ap.parse_args()
+
+    split_dir = args.split_dir
+    if not (split_dir / "X_train.parquet").exists():
+        sys.exit(f"error: no splits in {split_dir}. "
+                 f"Run scripts/rebuild_hazard_features.py first.")
+
+    # Written by rebuild_hazard_features.py; absent for the original splits.
+    rebuild_meta_path = split_dir / "rebuild_meta.json"
+    rebuild_meta = (json.loads(rebuild_meta_path.read_text())
+                    if rebuild_meta_path.exists() else None)
+    rebuilt_columns = rebuild_meta["rebuilt_columns"] if rebuild_meta else []
 
     t0 = time.time()
 
@@ -169,9 +214,17 @@ def main() -> int:
     features = list(scaler.feature_names_in_)
     print(f"==> scaler: {type(scaler).__name__} over {scaler.n_features_in_} features")
 
-    Xtr, ytr = load_split("train")
-    Xva, yva = load_split("val")
-    Xte, yte = load_split("test")
+    print(f"==> splits from {split_dir.relative_to(ROOT)}")
+    if rebuilt_columns:
+        print(f"    {rebuilt_columns} re-sampled from the terrain rasters; "
+              f"{rebuild_meta['rows_before']:,} -> {rebuild_meta['rows_after']:,} rows")
+    else:
+        print("    WARNING: original splits -- slope_deg correlates 0.309 with the "
+              "terrain the service samples and aspect_deg is uniform noise.")
+
+    Xtr, ytr = load_split("train", split_dir)
+    Xva, yva = load_split("val", split_dir)
+    Xte, yte = load_split("test", split_dir)
 
     # The feature order must come from the scaler, not from the parquet: at
     # inference the service builds a raw vector, scales it, and predicts. If
@@ -186,9 +239,11 @@ def main() -> int:
         sys.exit(f"error: unexpected columns {extra} -- not in the scaler and not dropped")
     print(f"==> dropping {dropped} -> {len(features)} features: {features}")
 
-    assert_prescaled(Xtr, features)
-    print("==> verified: feature columns are already RobustScaler output "
-          "(median 0, IQR 1) -- not re-scaling")
+    assert_prescaled(Xtr, features, scaler)
+    print("==> verified: feature columns inverse-transform to physically "
+          "possible values -- they are scaler output, not raw units"
+          + (f"; {rebuilt_columns} re-sampled from rasters"
+             if rebuilt_columns else ""))
 
     leakage = check_split_leakage({"train": Xtr, "val": Xva, "test": Xte}, features)
     print(f"==> split overlap: {leakage}")
@@ -288,6 +343,12 @@ def main() -> int:
         "features": features,
         "dropped_columns": DROP_COLUMNS,
         "features_are_prescaled_in_parquet": True,
+        "split_dir": str(split_dir.relative_to(ROOT)),
+        "feature_source": "rebuilt_from_rasters" if rebuilt_columns else "as_shipped",
+        "rebuilt_columns": rebuilt_columns,
+        # Read by HazardModel and surfaced on every response. Empty once the
+        # features the service computes are the ones the model trained on.
+        "unvalidated_features": [] if rebuilt_columns else ["slope_deg", "aspect_deg"],
         "scaler_file": SCALER_PATH.name,
         "scaler_type": type(scaler).__name__,
         "classes": CLASS_NAMES,

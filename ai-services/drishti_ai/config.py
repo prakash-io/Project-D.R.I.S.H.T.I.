@@ -29,21 +29,20 @@ FEATURE_SCALER_PATH = _path("FEATURE_SCALER_PATH", "data/artifacts/risk/feature_
 #: (WEB-04). Compared against `hazard_probability`, i.e. 1 - P(SAFE_TERRAIN).
 RISK_FLAG_THRESHOLD = float(os.getenv("RISK_FLAG_THRESHOLD", "0.85"))
 
-#: Features whose TRAINING values do not correspond to what the serving
-#: pipeline computes for the same coordinate. Established by re-deriving 490
-#: training coordinates through the serving path (REVISION.md R8):
+#: Fallback for a model whose metadata predates `unvalidated_features`.
 #:
-#:   elevation_m      corr 0.979  -- real
-#:   dist_to_road_m   corr 0.999  -- real
-#:   dist_to_river_m  corr 0.844  -- real
-#:   slope_deg        corr 0.309  -- NOT the terrain slope
-#:   aspect_deg       corr -0.018 -- uniform noise, KS p=0.33 against
-#:                                   Uniform(0,360) over 22,195 rows
+#: The authoritative list now lives in `hazard_model_meta.json`, written by
+#: train_hazard_xgb.py: it is empty when the model was trained from
+#: raster-rebuilt features and ["slope_deg", "aspect_deg"] when it was trained
+#: from the splits as shipped. Keeping it model-derived means retraining
+#: cannot leave a stale warning behind, in either direction.
 #:
-#: `slope_deg` carries 61% of the model's gain, so the single most important
-#: input is one the service cannot reproduce. Served scores are reported with
-#: this attached rather than presented as calibrated probabilities.
-UNVALIDATED_FEATURES = ["slope_deg", "aspect_deg"]
+#: History: as shipped, `slope_deg` correlated 0.309 with the terrain the
+#: service samples and `aspect_deg` was uniform noise (KS p=0.33 over 22,195
+#: rows), while `slope_deg` carried 61% of the model's gain. After
+#: scripts/rebuild_hazard_features.py both correlate 1.000 exactly.
+UNVALIDATED_FEATURES = [c.strip() for c in
+                        os.getenv("UNVALIDATED_FEATURES", "").split(",") if c.strip()]
 
 # ------------------------------------------------------------- spatial indices
 INDEX_DIR = _path("INDEX_DIR", "data/processed/indices")

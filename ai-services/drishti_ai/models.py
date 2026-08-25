@@ -120,6 +120,12 @@ class HazardModel:
         self.features: list[str] = self.meta["features"]
         self.classes: list[str] = self.meta["classes"]
         self.best_iteration = int(self.meta.get("best_iteration", 0))
+        # The model's own metadata is authoritative; config is only a fallback
+        # for a checkpoint trained before the field existed.
+        declared = self.meta.get("unvalidated_features")
+        source = declared if declared is not None else config.UNVALIDATED_FEATURES
+        self.unvalidated_features = [f for f in source if f in self.features]
+        self.feature_source = self.meta.get("feature_source", "unknown")
 
         scaler_features = list(self.scaler.feature_names_in_)
         if scaler_features != self.features:
@@ -159,8 +165,7 @@ class HazardModel:
             class_probabilities=probabilities,
             high_risk=hazard_p >= config.RISK_FLAG_THRESHOLD,
             out_of_distribution=self.out_of_distribution(scaled),
-            unvalidated_features=[f for f in config.UNVALIDATED_FEATURES
-                                  if f in self.features],
+            unvalidated_features=self.unvalidated_features,
         )
 
     def out_of_distribution(self, scaled_row) -> list[str]:

@@ -416,19 +416,44 @@ def test_vision_pool_recovers_after_the_worker_dies():
 
 # ------------------------------------------------------- trust signals
 
-def test_score_is_flagged_untrustworthy_while_features_are_unvalidated(client):
-    """`trustworthy` must be false while slope/aspect cannot be reproduced.
+def test_score_is_trustworthy_now_the_features_are_raster_derived(client):
+    """`trustworthy` must be true now that training and serving agree.
 
-    `slope_deg` correlates 0.309 with the terrain the service samples and
-    carries ~61% of the model's gain; `aspect_deg` is uniform noise. A caller
-    must not read `hazard_probability` as a calibrated number while that
-    holds, so the response says so on every request.
+    Before the rebuild `slope_deg` correlated 0.309 with the terrain the
+    service samples and `aspect_deg` was uniform noise, so every response was
+    flagged. After `rebuild_hazard_features.py` both correlate 1.000 exactly
+    and the flag must clear -- a warning that never goes away is a warning
+    nobody reads.
     """
     body = client.post("/predict-hazard",
                        json={"latitude": 27.5, "longitude": 92.0, "overrides": DRY}).json()
 
-    assert set(body["unvalidated_features"]) == {"slope_deg", "aspect_deg"}
-    assert body["trustworthy"] is False
+    assert body["unvalidated_features"] == []
+    assert body["out_of_distribution_features"] == []
+    assert body["trustworthy"] is True
+
+
+def test_predictions_follow_the_terrain(client):
+    """Physical sanity, not accuracy: steep means landslide, flat means not.
+
+    This is the check that caught the relabelling bug. Rebuilding slope while
+    leaving labels that were generated from the OLD slope produced a model
+    that called a 1.8 deg valley floor LANDSLIDE_RISK and a 23.5 deg ridge
+    FLOOD_RISK, all while scoring 0.907 against those same broken labels.
+    No accuracy number would have caught it.
+    """
+    steep = client.post("/predict-hazard",
+                        json={"latitude": 27.5, "longitude": 92.0,
+                              "overrides": DRY}).json()
+    flat = client.post("/predict-hazard",
+                       json={"latitude": 24.8170, "longitude": 93.9368,
+                             "overrides": DRY}).json()
+
+    assert steep["features"]["slope_deg"] > 30
+    assert flat["features"]["slope_deg"] < 5
+    assert steep["predicted_class"] == "LANDSLIDE_RISK"
+    assert flat["predicted_class"] != "LANDSLIDE_RISK"
+    assert steep["hazard_probability"] > flat["hazard_probability"]
 
 
 def test_out_of_distribution_input_is_named_not_extrapolated(client):

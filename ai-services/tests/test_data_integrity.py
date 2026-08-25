@@ -122,15 +122,14 @@ def hazard_raw():
     return raw
 
 
-def test_training_aspect_is_uniform_noise(hazard_raw):
-    """`aspect_deg` in the training data is not terrain aspect.
+def test_shipped_aspect_was_uniform_noise(hazard_raw):
+    """The ORIGINAL `aspect_deg` is not terrain aspect, and still isn't.
 
     Over 22,195 rows it is statistically indistinguishable from
-    Uniform(0, 360) -- KS p = 0.33 -- and it correlates -0.018 with the aspect
-    the service samples from the GeoTIFFs at the same coordinate.
-
-    If this FAILS the feature may have become real; re-run the serving-vs-
-    training consistency check and shorten config.UNVALIDATED_FEATURES.
+    Uniform(0, 360) -- KS p = 0.33 -- and correlates -0.018 with the aspect
+    the service samples at the same coordinate. This asserts the shipped file,
+    which is why the rebuild exists; the SERVED model no longer uses it (see
+    the test below).
     """
     from scipy import stats
 
@@ -138,30 +137,62 @@ def test_training_aspect_is_uniform_noise(hazard_raw):
     normalised = (aspect - aspect.min()) / (aspect.max() - aspect.min())
     result = stats.kstest(normalised, "uniform")
     assert result.pvalue > 0.05, (
-        f"aspect_deg no longer looks uniform (KS p={result.pvalue:.4g}) -- "
-        f"it may now be real terrain aspect"
+        f"the shipped aspect_deg no longer looks uniform (KS p={result.pvalue:.4g}) "
+        f"-- it may have been regenerated as real terrain aspect"
     )
-    assert "aspect_deg" in config.UNVALIDATED_FEATURES
 
 
-def test_unvalidated_features_are_declared_and_carry_the_model(hazard_raw):
-    """The features the service cannot reproduce are named in config.
+def test_served_model_is_trained_on_raster_derived_features():
+    """The model in use must be the rebuilt one, not the shipped features.
 
-    `slope_deg` is the one that matters: it correlates 0.309 with the terrain
-    rasters yet carries ~61% of the model's gain, so the input the model leans
-    on hardest is the one the service cannot reproduce.
+    `slope_deg`/`aspect_deg` in the shipped table do not describe the
+    coordinate they are attached to (0.309 and -0.018 against the rasters),
+    and slope carried ~61% of the model's gain. The served model must
+    therefore come from `landslide_rebuilt`, and must declare that it has no
+    unvalidated features left.
     """
     import json
-
-    assert set(config.UNVALIDATED_FEATURES) == {"slope_deg", "aspect_deg"}
 
     meta_path = config.XGB_MODEL_PATH.with_name(config.XGB_MODEL_PATH.stem + "_meta.json")
     if not meta_path.exists():
         pytest.skip("hazard model not trained")
-    gain = json.loads(meta_path.read_text())["feature_importance_gain"]
-    assert gain["slope_deg"] > 0.4, (
-        "slope_deg no longer dominates the model; re-check whether the "
-        "unvalidated-feature warning is still warranted"
+    meta = json.loads(meta_path.read_text())
+
+    assert meta["feature_source"] == "rebuilt_from_rasters", (
+        "the served model was trained on the shipped features, whose slope and "
+        "aspect are synthetic. Run scripts/rebuild_hazard_features.py."
+    )
+    assert sorted(meta["rebuilt_columns"]) == ["aspect_deg", "slope_deg"]
+    assert meta["unvalidated_features"] == []
+
+
+def test_rebuilt_labels_track_real_terrain():
+    """Relabelling must have restored the physical ordering of the classes.
+
+    The labels were generated from the OLD slope, so carrying them onto real
+    terrain unchanged makes the classes indistinguishable by slope --
+    FLOOD_RISK averaged 16.5 deg against SAFE_TERRAIN's 17.0 deg, and the
+    model called a valley floor a landslide. After relabelling, mean slope
+    must again rise FLOOD < SAFE < LANDSLIDE.
+    """
+    import joblib
+
+    rebuilt = ROOT / "data" / "processed" / "landslide_rebuilt"
+    if not (rebuilt / "X_train.parquet").exists():
+        pytest.skip("rebuilt splits not present")
+
+    scaler = joblib.load(config.FEATURE_SCALER_PATH)
+    features = list(scaler.feature_names_in_)
+    X = pd.concat([pd.read_parquet(rebuilt / f"X_{s}.parquet")
+                   for s in ("train", "val", "test")], ignore_index=True)
+    y = pd.concat([pd.read_parquet(rebuilt / f"y_{s}.parquet")
+                   for s in ("train", "val", "test")], ignore_index=True)
+    raw = pd.DataFrame(scaler.inverse_transform(X[features].to_numpy()), columns=features)
+
+    mean_slope = {c: raw.loc[(y["hazard_label"] == c).to_numpy(), "slope_deg"].mean()
+                  for c in ("FLOOD_RISK", "SAFE_TERRAIN", "LANDSLIDE_RISK")}
+    assert mean_slope["FLOOD_RISK"] < mean_slope["SAFE_TERRAIN"] < mean_slope["LANDSLIDE_RISK"], (
+        f"labels no longer track slope: {mean_slope}"
     )
 
 

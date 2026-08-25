@@ -22,7 +22,7 @@ reverse-engineer. Newest revision first.
 | 2 | ML-01 FastAPI service | ✅ running, 35 tests pass |
 | 2 | ML-02 load scaler / indices / rasters | ✅ + built the road index that never shipped |
 | 2 | ML-03 Open-Meteo peak intensity | ✅ live |
-| 2 | ML-04 XGBoost hazard model | ⚠️ trained & served, but 61% of its gain rests on a fabricated feature — see R8 |
+| 2 | ML-04 XGBoost hazard model | ✅ retrained on raster-rebuilt features, 0.9942 test acc, physically coherent — see R9 |
 | 2 | ML-05 YOLOv8 incident verifier | ⚠️ retrained 2-class, 1.000 top-1 — but trained on satellite/aerial, served ground-level photos, see R8 |
 | 2 | ML-06 `/predict-hazard`, `/verify-incident` | ✅ both verified end-to-end, 57 tests |
 | 3 | WEB-01…05 React + Deck.gl dashboard | ⬜ not started |
@@ -32,7 +32,7 @@ reverse-engineer. Newest revision first.
 
 Published at
 [prakash-io/Project-D.R.I.S.H.T.I.](https://github.com/prakash-io/Project-D.R.I.S.H.T.I.)
-· branch `main` · 3 commits.
+· branch `chunk1-ai-hybrid-service` · Chunk 1 committed as `2cb6088`.
 
 ---
 
@@ -123,6 +123,119 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R9 — 2026-08-25 · Executive decisions applied; hazard features rebuilt
+
+Chunk 1 approved and committed (`2cb6088`, branch `chunk1-ai-hybrid-service`).
+All seven open questions decided. This entry records the decisions and
+implements Q1 and Q4.
+
+**Created**: `scripts/rebuild_hazard_features.py`,
+`data/processed/landslide_rebuilt/`
+
+**Modified**: `train_hazard_xgb.py`, `config.py`, `models.py`, `main.py`,
+tests, `CLAUDE.md` (moved), `data/MANIFEST.yml`
+
+**Tests**: 57 → **59 passing**, 1 skipped.
+
+### The decisions
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Fabricated `slope_deg`/`aspect_deg` | **Rebuild from the rasters.** Done below. |
+| 2 | Vision false positives | **Dispatcher approval.** Keep 2 classes; API-03 sets `PENDING_DISPATCHER_APPROVAL`, WEB-05 is the safety valve. |
+| 3 | IMU speed drift (4.0 m/s) | **Accept as a weak secondary measurement.** No architecture change; lean on offline map-matching against the SpatiaLite graph. |
+| 4 | `CLAUDE.md` location | **Move to the project root.** Done — it no longer loads as context for every project under `~`. |
+| 5 | Rosetta on Postgres | **Accept for local development.** |
+| 6 | Synthetic hazard labels | **Accepted as a hackathon demonstrator.** |
+| 7 | Rainfall window | **Forecast horizon**, matching §5's pre-emptive intent. Already the default; `RAINFALL_WINDOW` switches it. |
+
+Q2 carries a schema consequence for Chunk 2: `incidents.status` currently
+allows `('pending','verified','rejected','cleared')`. Migration 002 needs
+`pending_dispatcher_approval`, and API-03 must write it rather than
+`verified` whenever `/verify-incident` returns `requires_human_review`.
+
+### Q1 — rebuilding the features, and the trap in doing so
+
+`scripts/rebuild_hazard_features.py` re-samples `slope_deg` and `aspect_deg`
+from the terrain GeoTIFFs at each training row's own lat/lon. Verified against
+the serving pipeline afterwards: both now correlate **1.000 with 100% exact
+match**, against 0.309 and −0.018 before. Training and serving finally agree on
+the physical inputs, which is what the decision asked for.
+
+Two things had to be handled that the instruction could not have anticipated.
+
+**19.9% of rows had to go.** 4,247 training coordinates fall outside every
+terrain sheet, so no real slope exists for them. They are dropped rather than
+left at their synthetic values — keeping them would preserve the very thing
+being removed. A further 165 rows were dropped for a subtler reason: replacing
+slope and aspect collapses coordinates that differ only in those two columns
+into identical feature vectors, and some of those pairs straddled the splits.
+That is **leakage created by the rebuild** — 88 test rows and 77 val rows the
+model would have already seen. The originals had none. Removed, and the
+leakage check now reports zero.
+
+**The labels had to move with the feature, and this is the important part.**
+The labels were generated *from* the old slope. Replacing the feature and
+keeping the label does not merely lower accuracy — it inverts the model:
+
+| mean `slope_deg` per label | original | rebuilt, labels kept |
+|---|---|---|
+| FLOOD_RISK | 1.4° | 16.5° |
+| SAFE_TERRAIN | 8.1° | 17.0° |
+| LANDSLIDE_RISK | 32.0° | 27.6° |
+
+The three classes become nearly indistinguishable by slope — real slope
+predicts the label at 0.545, down from 0.934 — and the model trained that way
+called a **1.8° valley floor LANDSLIDE_RISK and a 23.5° ridge FLOOD_RISK**,
+while scoring a respectable 0.9073 against those same broken labels. No
+accuracy number would have caught it; it was found by scoring five coordinates
+whose answers are obvious by inspection.
+
+The fix is not to invent thresholds. The dataset's own labelling rule is
+recovered by fitting a depth-6 tree on the **original** raw features against
+the **original** labels — the generative rule, measured, with a held-out
+fidelity of **0.9845** — and re-applying it to the rebuilt features. Every
+threshold comes from the data.
+
+### Results
+
+| | before (as shipped) | after (rebuilt + relabelled) |
+|---|---|---|
+| rows | 22,195 | 17,783 |
+| split leakage | 0 | 0 (165 removed) |
+| depth-2 tree | 0.9607 | 0.9290 |
+| **xgboost** | **0.9913** | **0.9942** |
+| ROC-AUC hazard | 0.9997 | 0.9996 |
+| `slope_deg` vs serving | 0.309 | **1.000** |
+| `aspect_deg` vs serving | −0.018 | **1.000** |
+| `trustworthy` on responses | `false` | **`true`** |
+
+Physical sanity, which is the check that actually matters here:
+
+    44.6 deg, 4061 m, Himalaya      -> LANDSLIDE_RISK  0.957
+    23.5 deg ridge, Arunachal       -> LANDSLIDE_RISK  0.983
+    4.8 deg, 56 m, Brahmaputra      -> FLOOD_RISK      0.968
+    5.7 deg, 196 m from river       -> FLOOD_RISK      0.967
+    1.8 deg valley floor            -> SAFE_TERRAIN    0.126
+
+This remains a **synthetic demonstrator** (Q6). The model recovers a rule
+rather than forecasting landslides, and the depth-2 baseline still prints on
+every run to keep that visible. What changed is that it is now a *coherent*
+demonstrator: the inputs it trains on are the inputs it is served, and the
+labels describe the terrain those inputs measure.
+
+### One more guard replaced
+
+`assert_prescaled` checked median 0 / IQR 1, which only holds for the exact
+rows the scaler was fitted on — it fired on the correctly-scaled rebuilt
+subset. A guard that fires on good data gets deleted, so it now
+inverse-transforms and checks the result is physically possible instead. That
+is distribution-independent, survives subsetting, and is far more decisive on
+the case it exists for: raw units inverse-transform `elevation_m` to about
+421,000 m, which is not a mountain.
 
 ---
 
@@ -872,89 +985,50 @@ unquoted `mkdir`, 0 files) deleted after a zero-file safety check.
 
 ## Open questions
 
-Decisions that need a human, ordered by what they block.
+All seven questions were decided on 2026-08-25 (R9). Kept here as a record of
+what was chosen and what still follows from it.
 
-1. **The hazard model's dominant feature is fabricated.** `slope_deg` carries
-   61% of the model's gain and correlates 0.309 with the terrain the service
-   actually samples; `aspect_deg` is uniform noise (R8). The model learned on
-   a class-conditioned synthetic slope and is served a real raster slope, so
-   `hazard_probability` is not a calibrated number — the service returns
-   `trustworthy: false` on every response. Options:
+### Decided
 
-   - **Rebuild the feature table from the rasters** at the training
-     coordinates and retrain. The labels stay synthetic, but at least
-     training and serving would agree on what the inputs mean. Cheapest
-     real improvement.
-   - **Drop `slope_deg`/`aspect_deg`** and retrain on the five features that
-     do reproduce. Accuracy will fall a long way — that fall is the honest
-     measure of what these features support.
-   - **Source a real landslide inventory** and retrain end to end. The only
-     option that makes the score mean what WEB-04 implies it means.
+1. **Fabricated `slope_deg`/`aspect_deg`** → *rebuild from the rasters.*
+   Implemented in R9. Both now correlate 1.000 with the serving pipeline, and
+   the labels were re-derived with the dataset's own recovered rule so they
+   describe the terrain the features measure.
 
-   *Blocks any operational use of the risk overlay. Does not block wiring.*
+2. **Vision false positives** → *dispatcher approval.* 2 classes kept,
+   `requires_human_review: true` on every verified incident.
+   **Still to do in Chunk 2:** migration 002 must widen `incidents.status` to
+   include `pending_dispatcher_approval`, and API-03 must write that instead
+   of `verified` whenever the AI service asks for review. WEB-05 is the
+   load-bearing safety valve.
 
-2. **The incident verifier cannot recognise "no incident".** `NORMAL_TERRAIN`
-   is the guard that stops a road being blocked on a photo of nothing, and it
-   is untrainable from the shipped dataset: its labels are `index % 4 == 0`,
-   not image content (R7). All 30 held-out NORMAL_TERRAIN images are returned
-   as landslides at confidence indistinguishable from real ones, so the
-   confidence threshold cannot substitute. Three ways forward:
+3. **IMU speed drift (4.0 m/s MAE)** → *accept as a weak secondary
+   measurement.* No architecture change. **Follows for Chunk 3:** the EKF must
+   give the TFLite speed a large measurement variance, and offline
+   map-matching against the SpatiaLite road graph carries the burden of
+   along-track correction.
 
-   - **Route verified incidents through dispatcher approval** before any edge
-     is blocked. WEB-05 already specifies an incident review panel, so this
-     costs no new UI — it makes an existing screen load-bearing. Cheapest,
-     and safe today.
-   - **Label a real NORMAL_TERRAIN set.** A few hundred NER road photos with
-     nothing wrong in them. The only fix that makes the model autonomous.
-   - **Ship the verifier as two classes** (flood / landslide) and treat
-     "which kind of incident" as its only job, with the "is there one at all"
-     decision made elsewhere.
+4. **`CLAUDE.md` location** → *moved to the project root.* Done in R9.
 
-   The 4-vs-3 class mapping itself is settled: `DAMAGED_BRIDGE_INFRASTRUCTURE`
-   → `obstruction` (the edge is impassable either way) and `NORMAL_TERRAIN`
-   → null, in `config.YOLO_CLASS_TO_INCIDENT_KIND`. *Blocks API-03.*
-3. **What should the speed model actually predict?** At 4.0 m/s MAE, absolute
-   speed from a bare IMU window is not accurate enough to drive dead
-   reckoning (~240 m of drift per minute of blackout). Three options, in
-   increasing order of change:
+5. **Rosetta on the Postgres container** → *accepted for local development.*
 
-   - **Feed the previous EKF speed back in as a 7th input channel.** Turns an
-     absolute-speed regression into a correction problem, which is far better
-     conditioned. Cheapest change; the bridge already has the ring buffer.
-   - **Predict Δv per window and let the EKF integrate it.** Matches what the
-     IMU physically measures. Needs the EKF to own the speed state.
-   - **Accept it as a weak secondary measurement** with a large measurement
-     variance, and lean on map-matching against the cached road graph to
-     constrain along-track error.
+6. **Synthetic hazard labels** → *accepted as a hackathon demonstrator.* The
+   depth-2 baseline prints on every training run so the headline accuracy is
+   never read as forecasting skill.
 
-   This is a design decision, not a tuning knob — a bigger network will not
-   close a 4 m/s gap. *Blocks MOB-06 integration.*
-3. ~~**Which probability does `> 0.85` mean?**~~ **Resolved in R7.** The model
-   is 3-class, and `/predict-hazard` returns per-class probabilities alongside
-   `hazard_probability = 1 - P(SAFE_TERRAIN)`, which is what
-   `RISK_FLAG_THRESHOLD` compares against. WEB-04 reads that field.
+7. **Rainfall window** → *forecast horizon*, matching workflow §5's
+   pre-emptive intent. `RAINFALL_WINDOW=antecedent` switches it with no code
+   change if that is ever revisited.
 
-6. **The hazard model's labels are rule-generated, not observed** (R7).
-   `slope_deg` alone almost partitions the three classes on hard cutoffs, so
-   0.991 test accuracy measures rule-recovery, not landslide skill. The
-   serving pipeline is correct and reusable; what is missing is a label
-   source tied to real events. Does a validated NER landslide inventory exist
-   to retrain against, or is the synthetic model accepted as a demonstrator?
-   *Does not block anything — but it should not be quoted as accuracy.*
+### Still open
 
-7. **Is `rainfall_72h_mm` antecedent or forecast?** The service sums the
-   Open-Meteo *forecast* horizon, which is what workflow §5's pre-emptive
-   rerouting needs. Landslide triggering is better explained by rainfall that
-   has *already* fallen. The training features' provenance is unrecorded, so
-   the two could be on the same numeric scale with different meanings.
-   `WeatherClient` can supply either. *Affects ML-04 fidelity, not wiring.*
-4. **`CLAUDE.md` lives at `~/CLAUDE.md`**, so it loads as context for every
-   project under the home directory, not just this one. Move to
-   `~/drishti/CLAUDE.md`?
-5. **Rosetta emulation** on the Postgres container — accept for dev, or move
-   to a native arm64 Postgres with a pgRouting build?
-
----
+8. **The vision model is out of distribution on its real input.** The training
+   images are satellite tiles and aerial press photography; `/verify-incident`
+   receives ground-level photographs from a driver's phone. Decision 2 makes
+   this safe — a human confirms before any edge is blocked — but it does not
+   make the model *right*. Closing it needs a few hundred ground-level NER
+   road photos per class, including a genuine "nothing wrong here" class.
+   *Does not block the demo. Blocks autonomous incident verification.*
 
 ## Conventions
 

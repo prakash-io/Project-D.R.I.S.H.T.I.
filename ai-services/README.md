@@ -12,9 +12,10 @@ brew install libomp                     # xgboost needs the OpenMP runtime
 ai-services/.venv/bin/pip install -r ai-services/requirements.txt
 
 # artefacts, in dependency order
-ai-services/.venv/bin/python scripts/build_road_index.py     # ~18s
-ai-services/.venv/bin/python scripts/train_hazard_xgb.py     # ~1s
-ai-services/.venv/bin/python scripts/train_incident_yolo.py  # ~10min
+ai-services/.venv/bin/python scripts/build_road_index.py        # ~18s
+ai-services/.venv/bin/python scripts/rebuild_hazard_features.py # ~95s
+ai-services/.venv/bin/python scripts/train_hazard_xgb.py        # ~3s
+ai-services/.venv/bin/python scripts/train_incident_yolo.py     # ~4min
 
 ai-services/.venv/bin/uvicorn main:app --app-dir ai-services --port 8000
 ai-services/.venv/bin/python -m pytest ai-services/tests -q
@@ -41,35 +42,35 @@ curl -X POST localhost:8000/predict-hazard \
 rainfall fields and the request never touches Open-Meteo, which is how the
 tests stay deterministic and offline.
 
-## Neither model's score means what it looks like
+## What each model's score actually means
 
-Both are wired correctly and both are honest about themselves at runtime. Read
-`trustworthy` and `requires_human_review` before you read the numbers.
+Both models report their own limits at runtime. Read `trustworthy` and
+`requires_human_review` before you read the numbers.
 
-**`/predict-hazard` returns `trustworthy: false` on every request.** The
-training rows carry lat/lon, so the features can be re-derived and compared:
-`elevation_m` (0.979), `dist_to_road_m` (0.999) and `dist_to_river_m` (0.844)
-are real, but `slope_deg` correlates **0.309** with the terrain the service
-samples and `aspect_deg` is **uniform noise** (KS p = 0.33 over 22,195 rows).
-`slope_deg` carries 61% of the model's gain — the input it leans on hardest is
-one the service cannot reproduce. The response also names any feature outside
-the training support, because trees do not extrapolate: they return the edge
-leaf at full confidence.
+**`/predict-hazard` — coherent, but a demonstrator.** The shipped feature
+table's `slope_deg` correlated 0.309 with the terrain this service samples and
+`aspect_deg` was uniform noise, while slope carried 61% of the model's gain.
+`scripts/rebuild_hazard_features.py` re-samples both from the GeoTIFFs — they
+now correlate **1.000** — and re-derives the labels with the dataset's own
+recovered rule, because carrying labels generated from the old slope onto real
+terrain inverts the model (it called a 1.8° valley floor a landslide while
+scoring 0.907). Responses now report `trustworthy: true`.
 
-The labels are a two-line rule as well. A depth-2 decision tree reaches 0.9607
-against xgboost's 0.9913; `train_hazard_xgb.py` prints that baseline on every
-run so the headline is never read alone.
+It still recovers a threshold rule rather than forecasting landslides: a
+depth-2 tree reaches 0.9290 against xgboost's 0.9942, and
+`train_hazard_xgb.py` prints that baseline every run so the headline is never
+read alone.
 
-**`/verify-incident` returns `requires_human_review: true` on every verified
-incident.** The model has no "no incident" class — the dataset's
-NORMAL_TERRAIN labels are `index % 4 == 0`, not image content — and it was
-trained on satellite tiles and aerial press photography, while the endpoint
-receives ground-level phone photos. API-03 must route through the WEB-05
-dispatcher panel, not set an edge cost to 999999 directly.
+**`/verify-incident` — never blocks a road on its own.** It returns
+`requires_human_review: true` on every verified incident. The model has no
+"no incident" class (the dataset's NORMAL_TERRAIN labels are `index % 4 == 0`,
+not image content) and it was trained on satellite tiles and aerial press
+photography while the endpoint receives ground-level phone photos. API-03 must
+write `pending_dispatcher_approval` and let WEB-05 confirm.
 
 Its 1.000 test top-1 is real but unimpressive: the two pools differ by imaging
-modality, a colour histogram alone separates them at 86.7%, and validation
-accuracy is perfect after one epoch.
+modality, a colour histogram alone separates them at 86.7%, and validation is
+perfect after one epoch.
 
 ## Three things that will bite you
 

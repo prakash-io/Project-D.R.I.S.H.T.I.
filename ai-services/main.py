@@ -110,6 +110,8 @@ async def health() -> HealthResponse:
             "best_iteration": hazard.best_iteration,
             "test_accuracy": hazard.meta.get("test", {}).get("accuracy"),
             "risk_threshold": config.RISK_FLAG_THRESHOLD,
+            "feature_source": hazard.feature_source,
+            "unvalidated_features": hazard.unvalidated_features,
         },
         indices={k.replace("_index", ""): len(v)
                  for k, v in state.items() if k.endswith("_index")},
