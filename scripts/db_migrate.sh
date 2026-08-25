@@ -52,22 +52,59 @@ if [[ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")" != "healthy
 fi
 
 shopt -s nullglob
-migrations=("$ROOT"/backend/migrations/*.sql)
+migrations=("$ROOT"/backend/migrations/[0-9]*.sql)
 if (( ${#migrations[@]} == 0 )); then
     echo "no migrations found in backend/migrations/" >&2
     exit 1
 fi
 
+# A ledger, because this script applies every migration on every run and none
+# of them are idempotent: re-running 001 fails on `CREATE TABLE trucks`, so
+# before this existed the script only worked against a fresh volume. Only
+# numbered files are migrations -- smoke_test.sql is a test, not a step.
+psql_run() {
+    docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -qtA -U "$DB_USER" -d "$DB_NAME" "$@"
+}
+
+psql_run -c "
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename    TEXT PRIMARY KEY,
+    sha256      TEXT NOT NULL,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);" >/dev/null
+
 for f in "${migrations[@]}"; do
-    echo "==> applying $(basename "$f")"
+    name="$(basename "$f")"
+    sum="$(shasum -a 256 "$f" | cut -d" " -f1)"
+    recorded="$(psql_run -c "SELECT sha256 FROM schema_migrations WHERE filename = '$name';")"
+
+    if [[ -n "$recorded" ]]; then
+        if [[ "$recorded" != "$sum" ]]; then
+            # An applied migration that has since been edited. Silently
+            # skipping it would leave the database and the file disagreeing,
+            # which is worse than stopping.
+            echo "==> ERROR: $name was already applied but its contents have changed." >&2
+            echo "    applied sha256 $recorded" >&2
+            echo "    current sha256 $sum" >&2
+            echo "    Add a new migration instead of editing an applied one," >&2
+            echo "    or rebuild from scratch with: scripts/db_migrate.sh --reset" >&2
+            exit 1
+        fi
+        echo "==> skipping $name (already applied)"
+        continue
+    fi
+
+    echo "==> applying $name"
     # ON_ERROR_STOP makes psql exit non-zero on the first failing statement;
     # without it psql reports the error and still exits 0, so a broken
     # migration looks like a success.
     if ! docker exec -i "$CONTAINER" \
             psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$f"; then
-        echo "==> FAILED on $(basename "$f")" >&2
+        echo "==> FAILED on $name" >&2
         exit 1
     fi
+    psql_run -c "INSERT INTO schema_migrations (filename, sha256)
+                 VALUES ('$name', '$sum');" >/dev/null
 done
 
 echo "==> verifying"
