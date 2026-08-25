@@ -24,7 +24,9 @@ reverse-engineer. Newest revision first.
 | 4 | MOB-01…04, 07 React Native + C++ EKF | ⬜ not started |
 | 4 | MOB-05/06 TFLite velocity model | 🚫 **blocked** — IO-VNBD is LFS stubs |
 
-Repo has **0 commits**; 24 files staged.
+Published at
+[prakash-io/Project-D.R.I.S.H.T.I.](https://github.com/prakash-io/Project-D.R.I.S.H.T.I.)
+· branch `main` · 2 commits.
 
 ---
 
@@ -88,6 +90,37 @@ data/raw/geo/road_network.parquet   238,170 rows, MultiLineString
                 ▼
         route_astar(start, end, risk_weight, heuristic_factor)
 ```
+
+---
+
+## R5 — 2026-08-25 · First commit, published to GitHub
+
+**Created**: `LICENSE` (Apache 2.0, inherited from the remote)
+
+**Modified**: `.gitignore` (merged), `REVISION.md`
+
+Remote: `https://github.com/prakash-io/Project-D.R.I.S.H.T.I..git`.
+Commit `12ce47f`, 26 files, 1628 insertions, 65 KB.
+
+The remote was **not empty** — GitHub's auto-generated `Initial commit`
+(`2c93ff0`) already carried an Apache 2.0 `LICENSE` and a 218-line Python
+`.gitignore`. Local `main` had an unrelated history, so a plain push would
+have been rejected and a force-push would have destroyed the licence.
+Rebased onto `origin/main` instead; the licence is preserved and history is
+linear.
+
+`.gitignore` was the only conflict. Resolved by keeping the project rules and
+folding in the template's useful Python entries (`.mypy_cache`, `.tox`,
+`.nox`, `.ipynb_checkpoints`, `.coverage`, `htmlcov`, `*.egg`).
+
+Deliberately **not** carried over from the template: `lib/`, `lib64/`, `bin/`,
+`share/`, `downloads/`, `parts/`. Those are virtualenv-layout entries; in this
+repo they would silently hide real source directories. The template also had
+no rule for `data/` — on its own it would have tried to commit 9.5 GB,
+including a 1.5 GB pickle and 7.4 GB of GeoTIFFs.
+
+Verified after the rebase: `git check-ignore` still catches the data payload,
+working tree clean, 27 files tracked totalling 65 KB.
 
 ---
 
