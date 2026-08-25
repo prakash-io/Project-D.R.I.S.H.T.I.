@@ -219,8 +219,52 @@ datasets:
       past incident.
 
       Class balance is skewed: DAMAGED_BRIDGE_INFRASTRUCTURE has 40 train /
-      3 val / 4 test images. Val at n=3 cannot support a per-class metric —
-      expect that class to be unreliable, and weight or augment it.
+      3 val / 6 test images. Val at n=3 cannot support a per-class metric.
+
+      R7 — IT IS WORSE THAN IMBALANCE. TWO OF THE FOUR CLASSES ARE NOT
+      CONTENT LABELS AT ALL. They are assigned by filename index arithmetic,
+      verified against all 1380 labels with zero violations:
+
+          landslide pool:  index % 4  == 0  ->  NORMAL_TERRAIN         (800/800)
+          flood pool:      index % 12 == 0  ->  DAMAGED_BRIDGE_INFRA.  (580/580)
+
+      There are only two image pools, flood_* and landslide_*, and the two
+      minority classes are sprinkled deterministically across them. An image
+      labelled NORMAL_TERRAIN is a landslide photograph that landed on an
+      index divisible by 4.
+
+      Consequences, measured rather than assumed:
+
+      * Those two classes are unlearnable by construction. 36 of 208 test
+        images (17.3%) carry a label uncorrelated with their content, which
+        puts a hard 0.827 ceiling on top-1. The trained model hits exactly
+        0.8269 and gets 172/172 = 100% of the honestly-labelled images right.
+      * The confidence threshold cannot guard it. All 30 NORMAL_TERRAIN test
+        images come back ACTIVE_LANDSLIDE_DEBRIS at median confidence 0.794,
+        against 0.786 for genuine landslides. At 0.90 the threshold rejects
+        0 of 30 mislabelled-normal images and 82 of 86 true landslides.
+
+      The dataset supports a TWO-class flood/landslide verifier and nothing
+      more. NORMAL_TERRAIN — the guard that stops a road being blocked on a
+      photo of nothing — cannot be trained from this data.
+
+      R8 — AND THE IMAGES ARE THE WRONG KIND. Inspected directly: the
+      landslide pool is SATELLITE false-colour tiles of forested hillsides;
+      the flood pool is AERIAL press and drone photography (one carries a
+      news-agency watermark). Both pools are remote sensing. Neither contains
+      what /verify-incident is actually sent — a ground-level photograph taken
+      by a driver standing in front of a blocked road. Every real input is out
+      of distribution.
+
+      This also explains the perfect scores. The two pools differ by imaging
+      MODALITY, not by hazard: a colour histogram alone (48 numbers, all
+      shape and texture destroyed) separates them at 86.7%, and the CNN
+      reaches val top-1 = 1.000 after ONE epoch. The model is distinguishing
+      satellite tiles from aerial photos, which is not the task.
+
+      Fixing this needs new data: a few hundred ground-level NER road photos
+      per class, including a genuine "nothing wrong here" class. See
+      REVISION.md open questions.
 
       data.yaml `path:` still points at D:/SIH DATA/... from the machine that
       built it. Rewrite to this directory before training.
@@ -314,6 +358,46 @@ datasets:
       all 10 to the scaler raises, passing the scaled 8 in the wrong order
       does not. Order is load-bearing in both directions.
 
+      R7 — THE 8 FEATURE COLUMNS IN THESE FILES ARE ALREADY SCALED. They are
+      RobustScaler OUTPUT, not raw units: elevation_m has median 0.0 and
+      range [-0.61, 6.46]. Only latitude/longitude are raw, which is exactly
+      what makes the file look unscaled at a glance. Applying the scaler
+      again during training centres already-centred data and produces a model
+      that disagrees with the service, which scales raw metres and degrees on
+      the way in. train_hazard_xgb.py asserts median 0 / IQR 1 across all
+      eight and refuses to run otherwise. Inverse-transforming recovers sane
+      units (elevation 0–5867 m, slope 0.1–61.5 deg), which is how it was
+      confirmed.
+
+      R8 — HALF THESE FEATURES ARE NOT MEASUREMENTS OF THE GIVEN COORDINATE.
+      X carries latitude/longitude, so every feature can be re-derived through
+      the serving pipeline and compared. Over 490 training coordinates that
+      fall on the terrain sheets:
+
+          elevation_m      corr  0.979   real (median |diff| 0.0 m)
+          dist_to_road_m   corr  0.999   real
+          dist_to_river_m  corr  0.844   real
+          slope_deg        corr  0.309   NOT the terrain slope
+          aspect_deg       corr -0.018   uniform noise
+
+      aspect_deg is statistically indistinguishable from Uniform(0,360) across
+      all 22195 rows (KS p = 0.33). It is not terrain aspect, and the model
+      correctly gives it only 0.36% of gain.
+
+      slope_deg is the serious one. It correlates 0.309 with the rasters, its
+      per-class ranges carry hand-round bounds (FLOOD 0.10–4.50, SAFE
+      1.00–18.00, LANDSLIDE 15.00–61.82), and it holds ~61% of the model's
+      gain. The input the model leans on hardest is one the service cannot
+      reproduce: at serving time it is handed a real raster slope, having
+      learned on a class-conditioned synthetic one.
+
+      A further 18.3% of training coordinates fall outside every terrain sheet
+      and cannot be reproduced at all.
+
+      /predict-hazard therefore returns `unvalidated_features` and
+      `trustworthy: false` on every request rather than presenting the score
+      as a calibrated probability.
+
       Feature names differ from the spec's guess: rainfall is 24h/72h plus an
       intensity term (mm/h), NOT rainfall_1h. Open-Meteo queries in ML-03
       must produce exactly these three aggregates.
@@ -321,8 +405,10 @@ datasets:
       The target is 3-class (hazard_type), not binary — the spec's "Landslide
       Risk Probability Score (0-1)" is either P(is_hazard) or
       P(hazard_type == LANDSLIDE_RISK), and flood and landslide risk are
-      distinguishable. Pick one and pin it: WEB-04's >0.85 red threshold and
-      the ML-06 response contract must agree on which probability they mean.
+      distinguishable. RESOLVED in R7 by serving both: the model is 3-class
+      and /predict-hazard returns per-class probabilities alongside
+      hazard_probability = 1 - P(SAFE_TERRAIN), which is what the 0.85
+      threshold compares against.
 
   - id: spatial_indices
     path: data/processed/indices/
@@ -334,16 +420,34 @@ datasets:
       river_waterways_spatial_index.pkl:    {points: 450860, mb: 54.6}
       hazard_pinch_points_spatial_index.pkl: {points: 609308, mb: 127.5}
       bridges_spatial_index.pkl:            {points: 28532,  mb: 6.7}
+      road_network_spatial_index.pkl:       {points: 6252739, mb: 275.6}
       indices_metadata.json: build provenance and per-layer geometry validation
+      road_network_spatial_index.json: provenance for the road index (R7)
     notes: >
       scipy KDTree over densified vertices, loaded into FastAPI memory at
       startup. Three indices, not one — the spec only named the river index.
 
-      Indices are in DEGREES (EPSG:4326). A KDTree query returns Euclidean
-      degree distance, which is not metres and is not uniform across
-      latitude. dist_to_river_m in the training data is in metres, so the
-      serving path must convert the same way the training path did or the
-      feature is silently on a different scale. Confirm before ML-06.
+      RESOLVED (R7) — the indices are NOT in degrees, as R4 suspected they
+      might not be. tree.data holds PROJECTED METRES:
+
+          x = lon * 111139 * cos(25.5 deg)     y = lat * 111139
+
+      an equirectangular projection about the NER centre latitude, with each
+      index carrying its own center_lat: 25.5. Recovered by least-squares
+      against each index's own feature_records lat/lon and exact to ~1e-9 m
+      on all three. Note 111139, not the WGS84 111319.49 nor R*pi/180.
+
+      Querying one with a raw (lon, lat) pair does not raise — it lands the
+      query ~10^7 m outside the data cloud and returns an arbitrary confident
+      neighbour. Measured: a (27.5, 92.0) query returns a road vertex 399.7 km
+      away instead of the true 709 m.
+
+      The projection is exact only at 25.5 deg, so it is used to FIND
+      candidates and never to MEASURE them: drishti_ai.geo pulls k=8 and
+      re-ranks by haversine against the neighbour's true lat/lon.
+      verify_projection() re-checks the constants at every startup, so a
+      rebuilt index with a different constant fails loudly instead of
+      serving quietly wrong distances.
 
       Pickle is Python- and SciPy-version-sensitive; rebuild rather than move
       between interpreter versions.
@@ -373,27 +477,101 @@ datasets:
       and let sklearn check the order rather than relying on positional order.
 
   - id: risk_model
-    path: data/artifacts/risk/risk-xgb.ubj
-    format: xgboost_ubj
+    path: data/artifacts/risk/hazard_model.json
+    format: xgboost_json
     consumed_by: [ML-04, ML-06]
     required: true
-    status: NOT TRAINED — ML-04 output
-    source: derived
+    # No `status:` -- that field means "on disk but not the thing it claims"
+    # and check_data.py treats any value as a blocker. Training dates belong
+    # in trained_on.
+    trained_on: 2026-08-25
+    source: scripts/train_hazard_xgb.py, trained on landslide_features
+    trained_by: scripts/train_hazard_xgb.py
+    spec_says: risk-xgb.ubj
+    files:
+      hazard_model.json: multi:softprob booster, 891 KB
+      hazard_model_meta.json: feature order, class order, held-out metrics
+    architecture: 3-class multi:softprob, depth 6, 69 trees (early-stopped)
+    accuracy:
+      test_accuracy: 0.9913
+      test_logloss: 0.0625
+      roc_auc_hazard: 0.9997
+      roc_auc_landslide: 0.9999
     notes: >
-      Train on landslide_features. Outputs a probability; >= 0.85 paints the
-      edge red (WEB-04). See the 3-class caveat under landslide_features —
-      decide which probability the threshold applies to.
+      THE 0.85 QUESTION IS RESOLVED by making it moot: the model is 3-class,
+      so the response carries per-class probabilities AND
+      hazard_probability = 1 - P(SAFE_TERRAIN). RISK_FLAG_THRESHOLD compares
+      against hazard_probability. WEB-04 and ML-06 now share one definition.
+
+      READ THE ACCURACY WITH CARE. 99.1% is not landslide-prediction skill.
+      The labels are rule-generated from the features themselves: a DEPTH-2
+      DECISION TREE — two thresholds on two features — reaches 0.9607 on the
+      same held-out rows against xgboost's 0.9913. train_hazard_xgb.py prints
+      that baseline on every run so the headline can never be read alone. The
+      rule is slope_deg > ~15 deg -> LANDSLIDE_RISK, dist_to_river_m < ~800 m
+      -> FLOOD_RISK, else SAFE_TERRAIN.
+
+      Worse than the labels: the feature the model leans on hardest is
+      fabricated — see the R8 note under landslide_features. The model is NOT
+      usable as a calibrated hazard probability on live inputs, and the
+      service says so on every response via `trustworthy: false`.
+
+      Validating against real landslide outcomes is a separate, unstarted job.
+
+      The pipeline itself is sound: no row overlap between splits (checked),
+      early stopping on val, test never used for selection.
 
   - id: incident_model
     path: data/artifacts/vision/incident-yolov8n.pt
     format: pytorch_ultralytics
     consumed_by: [ML-05, ML-06]
     required: true
-    status: NOT TRAINED — ML-05 output
-    source: derived
+    trained_on: 2026-08-25
+    source: scripts/train_incident_yolo.py, trained on vision_hazard_yolo
+    trained_by: scripts/train_incident_yolo.py
+    architecture: yolov8n-cls, 1.44M params, imgsz 224, 40 epochs, 3.0 MB
+    classes: [FLOODED_ROAD_OR_SUBMERGED, ACTIVE_LANDSLIDE_DEBRIS]
+    label_source: pool
+    accuracy:
+      test_top1: 1.000
+      recall_FLOODED_ROAD_OR_SUBMERGED: 1.000
+      recall_ACTIVE_LANDSLIDE_DEBRIS: 1.000
     notes: >
-      YOLOv8 nano, trained on vision_hazard_yolo. Kept nano deliberately —
-      verification runs synchronously in the incident POST path.
+      CLASSIFICATION, not detection, though the source ships in detection
+      format. Every one of the 1380 images carries exactly one box, so the
+      task is one-label-per-image; the endpoint needs a class and a
+      confidence, not a box; and a detector that finds nothing returns
+      silence, which is dangerously easy to confuse with NORMAL_TERRAIN.
+
+      THE INDEX ORDER IS NOT data.yaml's. ImageFolder assigns class indices
+      alphabetically, so the trained model is
+      [ACTIVE_LANDSLIDE_DEBRIS, DAMAGED_BRIDGE_INFRASTRUCTURE,
+      FLOODED_ROAD_OR_SUBMERGED, NORMAL_TERRAIN] while data.yaml is
+      [NORMAL_TERRAIN, FLOODED_ROAD_OR_SUBMERGED, ACTIVE_LANDSLIDE_DEBRIS,
+      DAMAGED_BRIDGE_INFRASTRUCTURE]. Nothing may map a raw index through
+      data.yaml. IncidentVerifier maps by NAME via result.names.
+
+      R8 — RETRAINED AS TWO CLASSES (`--label-source pool`). The 4-class run
+      scored 0.827 with two classes at 0.000 recall, because those two labels
+      are filename arithmetic. Training on the pool label instead keeps all
+      1380 images, drops the noise, and every output now means something.
+
+      DO NOT READ test_top1 = 1.000 AS SKILL. The two pools are different
+      imaging modalities, val accuracy is 1.000 after one epoch, and a colour
+      histogram alone gets 86.7%. It is separating satellite tiles from aerial
+      photos.
+
+      Because the model has no "no incident" class AND is out of distribution
+      on ground-level photographs, /verify-incident returns
+      `requires_human_review: true` on every verified incident and API-03 must
+      not block an edge without dispatcher confirmation (WEB-05).
+
+      YOLO_CONF_THRESHOLD must exceed 1/n_classes or it can never reject:
+      top-1 softmax over 2 classes is always >= 0.5, which made the inherited
+      0.45 dead code. Raised to 0.75 and checked at startup.
+
+      Kept nano deliberately: verification runs synchronously in the incident
+      POST path, and it measures 0.4 ms/image on M2 MPS.
 
   - id: velocity_cnn
     path: data/artifacts/edge/speed_model.tflite

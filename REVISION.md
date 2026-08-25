@@ -17,9 +17,14 @@ reverse-engineer. Newest revision first.
 | Epic | Task | State |
 |---|---|---|
 | 1 | DB-01 PostGIS + pgRouting | ✅ running, migration applied & smoke-tested |
-| 1 | DB-02 GeoPandas → PostGIS ingest | ⬜ next — data ready, not written |
+| 1 | DB-02 GeoPandas → PostGIS ingest | ⬜ next — data probed (see R7 note), not written |
 | 1 | API-01…04 Express / BullMQ / incidents / reroute | ⬜ not started |
-| 2 | ML-01…06 FastAPI, XGBoost, YOLOv8 | ⬜ not started (data ready) |
+| 2 | ML-01 FastAPI service | ✅ running, 35 tests pass |
+| 2 | ML-02 load scaler / indices / rasters | ✅ + built the road index that never shipped |
+| 2 | ML-03 Open-Meteo peak intensity | ✅ live |
+| 2 | ML-04 XGBoost hazard model | ⚠️ trained & served, but 61% of its gain rests on a fabricated feature — see R8 |
+| 2 | ML-05 YOLOv8 incident verifier | ⚠️ retrained 2-class, 1.000 top-1 — but trained on satellite/aerial, served ground-level photos, see R8 |
+| 2 | ML-06 `/predict-hazard`, `/verify-incident` | ✅ both verified end-to-end, 57 tests |
 | 3 | WEB-01…05 React + Deck.gl dashboard | ⬜ not started |
 | 4 | MOB-01…04, 07 React Native + C++ EKF | ⬜ not started |
 | 4 | MOB-05 TFLite velocity model | ⚠️ trained, but MAE 4.0 m/s is not fit for purpose — see R6 |
@@ -27,7 +32,7 @@ reverse-engineer. Newest revision first.
 
 Published at
 [prakash-io/Project-D.R.I.S.H.T.I.](https://github.com/prakash-io/Project-D.R.I.S.H.T.I.)
-· branch `main` · 2 commits.
+· branch `main` · 3 commits.
 
 ---
 
@@ -118,6 +123,427 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R8 — 2026-08-25 · Correctness pass over the AI service
+
+A rigorous audit of everything R7 produced. Five defects in my own code, and
+three findings about the datasets that change what the two models mean. The
+code defects are fixed; the data findings cannot be fixed here, so the service
+now reports them on every response instead of hiding them.
+
+**Created**: `ai-services/drishti_ai/vision_worker.py`,
+`ai-services/tests/test_data_integrity.py`
+
+**Modified**: `weather.py`, `models.py`, `config.py`, `schemas.py`, `main.py`,
+`train_hazard_xgb.py`, `train_incident_yolo.py`, both artefacts, tests,
+`.env.example`, `data/MANIFEST.yml`
+
+**Tests**: 35 → **57 passing**, 1 skipped.
+
+### Bug 1 — the rainfall window was in the wrong place, twice
+
+`/predict-hazard`'s three rainfall features were computed over the wrong
+hours. Two independent causes, both silent:
+
+*   **The series does not start "now".** With `timezone=UTC`, Open-Meteo
+    returns whole days: `forecast_days=3` begins at 00:00 UTC *today*.
+    Measured at 16:42 UTC, `series[:24]` was 16 hours of already-elapsed
+    weather plus 8 hours of forecast — and only 56 of the 72 required forward
+    hours existed at all.
+
+*   **Nulls were compacted.** Open-Meteo emits `null` for hours it has no
+    value for, and dropping them shifts every later hour leftwards into the
+    window. With 6 leading nulls, a 40 mm/h cloudburst at true hour 28 — four
+    hours *outside* the window — was reported as the 24 h peak. **A 400x error
+    on the feature carrying the most hazard signal.**
+
+Fixed by locating the window in `hourly.time` rather than slicing from index
+0, requesting 4 forecast days so 72 forward hours always exist, and skipping
+nulls *in place* while reporting how many hours actually backed each figure.
+The effect on the verification coordinate is visible: rainfall went from
+76.8 / 8.6 / 1.2 to **98.9 / 36.6 / 6.3** once the window was correct.
+
+`past_days=3` now comes back in the same call, so `RAINFALL_WINDOW` switches
+between forecast and antecedent by configuration. That turns open question 7
+from a code change into a setting.
+
+### Bug 2 — torch and xgboost cannot share a macOS process
+
+Carried over from R7 and worth restating because the first fix was wrong. I
+tried forcing the import order (torch before xgboost); that stopped the hang
+and started a **SIGSEGV in xgboost instead**. The two runtimes are mutually
+incompatible, so reordering cannot win:
+
+    xgboost -> torch, then torch inference    hangs forever
+    torch -> xgboost, then xgboost predict    SIGSEGV
+
+Fixed properly by not sharing: vision runs in a **spawn**-context worker that
+imports torch and nothing else from the OpenMP set. 3.8 s cold, 19–37 ms warm.
+
+### Bug 3 — a dead worker wedged the endpoint permanently
+
+`ProcessPoolExecutor` poisons itself when a worker dies: every later `submit`
+raises `BrokenProcessPool` forever. Since the collision above manifests *as* a
+segfault, that is a reachable state, and "restart the service" is not a
+recovery path for a driver reporting a landslide. The pool is now dropped and
+rebuilt on both timeout and death. Tested by `SIGKILL`ing the live worker and
+asserting the next call recovers with identical output.
+
+### Bug 4 — the confidence threshold could never reject anything
+
+`YOLO_CONF_THRESHOLD` was 0.45, inherited from the 4-class spec. Softmax top-1
+over *n* classes is at least 1/n, so at 2 classes the top-1 confidence is
+always ≥ 0.5 and the threshold was **dead code**. Raised to 0.75, and the
+service now refuses to start if the threshold is at or below 1/n_classes.
+
+### Bug 5 — ultralytics wrote into the repo root
+
+`model.val()` ignores the `project` given to `train()` and creates
+`runs/classify/val` in the working directory; the pretrained checkpoint
+downloaded to the root as well. Both now land under `data/artifacts/vision/`,
+with `.gitignore` rules as a backstop.
+
+Also fixed: the weather cache was unbounded (now LRU-capped at 2048), and the
+scaler was being handed a bare array, which only *warns* on a column-order
+mismatch — it now gets a named DataFrame, so sklearn validates the order.
+
+### Finding 1 — half the hazard model's features are not measurements
+
+The training rows carry `latitude`/`longitude`, so every feature can be
+re-derived through the serving pipeline and compared against what the training
+file says. Over 490 training coordinates that fall on the terrain sheets:
+
+| feature | corr with serving pipeline | verdict |
+|---|---|---|
+| `elevation_m` | **0.979** | real |
+| `dist_to_road_m` | **0.999** | real |
+| `dist_to_river_m` | **0.844** | real |
+| `slope_deg` | **0.309** | not the terrain slope |
+| `aspect_deg` | **−0.018** | uniform noise |
+
+`aspect_deg` is statistically indistinguishable from Uniform(0, 360) across
+all 22,195 rows — KS p = 0.33. It is not terrain aspect. The model had already
+worked this out and gives it 0.36% of gain.
+
+`slope_deg` is the serious one. Its per-class ranges carry hand-round bounds
+(FLOOD 0.10–4.50, SAFE 1.00–18.00, LANDSLIDE 15.00–61.82) and it holds **61%
+of the model's gain**. So the input the model leans on hardest is the one the
+service cannot reproduce: it learned on a class-conditioned synthetic slope
+and is served a real raster slope. A further **18.3%** of training coordinates
+fall outside every terrain sheet and cannot be reproduced at all.
+
+This cannot be fixed by retraining on this data. What the service does instead:
+`/predict-hazard` returns `unvalidated_features` and `trustworthy: false` on
+every response, plus an `out_of_distribution_features` list computed against
+the training support recorded at train time — because gradient-boosted trees
+do not extrapolate, and a value past the training range returns the edge leaf
+with full confidence and no signal that it did.
+
+### Finding 2 — the hazard labels are a two-line rule
+
+`train_hazard_xgb.py` now fits shallow trees as a baseline and prints them
+next to the headline, permanently:
+
+| model | test accuracy |
+|---|---|
+| depth-1 tree | 0.7207 |
+| **depth-2 tree** | **0.9607** |
+| depth-3 tree | 0.9754 |
+| xgboost, 69 trees | 0.9913 |
+
+Two thresholds on two features get within three points of the model. The rule
+is `slope_deg > ~15°` → LANDSLIDE_RISK, `dist_to_river_m < ~800 m` →
+FLOOD_RISK, else SAFE_TERRAIN.
+
+### Finding 3 — the vision dataset is the wrong kind of image
+
+R7 established that two of the four classes are filename arithmetic. Looking
+at the images themselves shows something larger: **the landslide pool is
+satellite false-colour tiles and the flood pool is aerial press photography**
+(one carries a news-agency watermark). Both are remote sensing. Neither
+resembles what `/verify-incident` is actually sent — a ground-level photograph
+from a driver standing in front of a blocked road.
+
+That also explains the scores. The pools differ by imaging *modality*, not by
+hazard: a colour histogram alone — 48 numbers, every shape and texture
+destroyed — separates them at 86.7%, and the retrained model reaches val
+top-1 = 1.000 after **one epoch**.
+
+### What changed in the vision model
+
+Retrained with `--label-source pool`: **2 classes, 1.000 test top-1, 1.000
+recall on both**, all 1,380 images kept. Compared with R7's 4-class run at
+0.827 with two classes at 0.000 recall, every output now means something.
+
+The accuracy is still not skill — see Finding 3 — so `/verify-incident`
+returns `requires_human_review: true` on every verified incident, and
+`INCIDENT_REQUIRE_REVIEW` stays on until the training images are replaced.
+API-03 must route through the WEB-05 dispatcher panel rather than setting an
+edge cost to 999999 directly.
+
+### Data-integrity tests
+
+`tests/test_data_integrity.py` pins each finding as an assertion — the label
+arithmetic, the uniform aspect, the depth-2 recoverability, the review gate.
+**A failure there is not necessarily bad news**: it means a dataset was
+regenerated and the defect may be gone, which is the signal to retrain and
+relax the matching guard.
+
+---
+
+## R7 — 2026-08-25 · AI hybrid microservice (Epic 2: ML-01 … ML-06)
+
+**Created**
+- `ai-services/main.py` — FastAPI app, `/health`, `/predict-hazard`, `/verify-incident`
+- `ai-services/drishti_ai/` — `geo`, `rasters`, `weather`, `features`, `models`,
+  `schemas`, `config`
+- `ai-services/tests/` — 33 tests, no network required
+- `ai-services/requirements.txt`, `ai-services/README.md`, `ai-services/.venv/`
+- `scripts/build_road_index.py` — builds the road KDTree that never shipped
+- `scripts/train_hazard_xgb.py` — XGBoost hazard classifier (ML-04)
+- `scripts/train_incident_yolo.py` — YOLOv8n incident verifier (ML-05)
+- `data/artifacts/risk/hazard_model.json` + `_meta.json`
+- `data/processed/indices/road_network_spatial_index.pkl` + `.json`
+
+**Modified**: `.env.example`, `data/MANIFEST.yml`
+
+**Stack added**: FastAPI 0.141.1, uvicorn 0.52.4, XGBoost 3.4.1,
+scikit-learn 1.9.0, rasterio 1.5.1, scipy 1.18.1, shapely 2.1.2,
+ultralytics 8.4.128, torch 2.13.0, libomp (Homebrew), Python 3.12.12.
+
+### The KDTrees are not in degrees
+
+R4 flagged this as *"Indices are in DEGREES (EPSG:4326) … Confirm before
+ML-06."* Confirmed, and it was wrong. `tree.data` holds **projected metres**:
+
+    x = lon * 111139 * cos(25.5 deg)        y = lat * 111139
+
+An equirectangular projection about the NER centre latitude, which every index
+carries as its own `center_lat: 25.5`. Recovered by least-squares against each
+index's own `feature_records` lat/lon and exact to ~1e-9 m on all three
+independently. The constant is 111139 — not WGS84's 111319.49, not
+`R*pi/180`'s 111194.93.
+
+This matters because the failure is silent. Querying the tree with a raw
+`(lon, lat)` pair does not raise: it drops the query ~10^7 m outside the data
+cloud and returns a confident, arbitrary neighbour. Measured on the road
+index, a query for (27.5, 92.0) returns a vertex **399.7 km** away where the
+true nearest road is **709 m**. Every distance feature would have been
+garbage, and nothing would have complained.
+
+`drishti_ai/geo.py` owns the transform and splits the two jobs the projection
+was being asked to do:
+
+- **Finding** candidates — the KDTree, in projected space, `k=8`.
+- **Measuring** them — haversine against the neighbour's real lat/lon.
+
+The cos(25.5°) factor is exact only at 25.5°, so it is ~1.4% wrong in
+longitude at the 29.5° top of the bbox. Pulling 8 candidates and re-ranking by
+haversine means the distortion cannot pick the wrong neighbour either.
+`verify_projection()` re-projects the index's own coordinates at every startup
+and refuses to boot on a mismatch, so a rebuilt index with a different
+constant fails loudly instead of serving quietly wrong numbers.
+
+### The road index did not exist
+
+`dist_to_road_m` is one of the model's eight features, but
+`data/processed/indices/` shipped only rivers, bridges and pinch points.
+`/predict-hazard` had no way to produce the feature at all.
+
+`scripts/build_road_index.py` builds it from `road_network.parquet` in the
+same projection: 12,653,221 raw vertices, **6,252,739 distinct**, 275.6 MB,
+18 s. That distinct count was independently reproduced by a PostGIS
+`GROUP BY` over the same file — two toolchains, same number.
+
+Two deviations from the shipped indices, both deliberate. The upstream format
+carries one dict per indexed point, which is why 609 k pinch points cost
+133 MB; this stores plain float32 lat/lon arrays instead, so 6.25 M points fit
+in 275 MB. And it indexes *vertices*, so the reported distance is bounded by
+half the vertex spacing — the source is atomised into 2-point segments
+averaging ~26 m, giving ~13 m worst case against a feature whose training
+median is 1778 m. Cross-checked against PostGIS `ST_Distance` on the true line
+geometry: 5.8 vs 4.2 m, 11.1 vs 7.8 m, 12611 vs 12627 m.
+
+### The training features were already scaled
+
+`X_train.parquet` has ten columns and the scaler takes eight, which R4 had
+already caught. What R4 did not catch is that **the eight are RobustScaler
+output, not raw units** — `elevation_m` has median 0.0 and range
+[-0.61, 6.46]. Only `latitude`/`longitude` are raw, which is precisely what
+makes the file look untouched at a glance.
+
+Re-applying the scaler during training would centre already-centred data and
+produce a model that disagrees with the service, which *does* scale raw metres
+and degrees on the way in. Neither side would error. `assert_prescaled` checks
+median 0 and IQR 1 across all eight and aborts otherwise; inverse-transforming
+recovers sane units (elevation 0–5867 m, slope 0.1–61.5°), which is how it was
+confirmed.
+
+The scaler is also fed a named DataFrame rather than a bare array, so sklearn
+validates the column order instead of merely warning about it.
+
+### Which probability the 0.85 threshold means — resolved
+
+R2's open question 3. Resolved by making it moot: the model is 3-class
+(`multi:softprob`), and the response carries per-class probabilities alongside
+`hazard_probability = 1 - P(SAFE_TERRAIN)`. `RISK_FLAG_THRESHOLD` compares
+against `hazard_probability`. WEB-04 and ML-06 now read the same field.
+
+### Hazard model results — and why 99% is not the good news it looks like
+
+69 trees (early-stopped from 2000), depth 6, 8 features, 3 classes. Held out
+3,330 rows; no row overlap between splits, checked by hashing feature vectors.
+
+| | |
+|---|---|
+| 3-class accuracy | **0.9913** |
+| logloss | 0.0625 |
+| ROC-AUC `P(hazard)` | 0.9997 |
+| ROC-AUC `P(landslide)` | 0.9999 |
+| at threshold 0.85 | precision 0.9995, recall 0.9769 |
+
+**These labels are rule-generated from the features themselves.** Per-class
+ranges of `slope_deg` are FLOOD_RISK [0.1, 4.5], SAFE_TERRAIN [1.0, 18.0],
+LANDSLIDE_RISK [15.0, 61.8] — hard cutoffs at 4.5, 15.0, 18.0 — and
+SAFE_TERRAIN has a floor on `dist_to_river_m` at exactly 800.3 m. Those two
+features carry 84% of the model's gain. The model is recovering a synthetic
+labelling rule, and recovering it very well. It is not evidence of
+landslide-prediction skill, and the number must not be quoted as if it were.
+
+The pipeline around it is sound and is the part worth keeping: correct
+scaling, honest splits, early stopping on val, test untouched by selection.
+Swapping in real labels is a retrain, not a rewrite.
+
+### Vision: two of the four classes are not labels
+
+`05_vision_hazard_detection_yolo` ships in **detection** format, but all 1,380
+images carry exactly one box each — audited, no exceptions. That makes it a
+one-label-per-image task, so ML-05 trains `yolov8n-cls`, not a detector: the
+endpoint needs a class and a confidence, a detector on 965 images with a box
+head is worse conditioned, and "no detection" is dangerously easy to confuse
+with NORMAL_TERRAIN in the backend. The detection labels are not discarded —
+they are the source of the per-image class.
+
+Training reached **0.827 test top-1**, and the per-class breakdown is the
+story:
+
+| class | n | recall |
+|---|---|---|
+| FLOODED_ROAD_OR_SUBMERGED | 86 | **1.000** |
+| ACTIVE_LANDSLIDE_DEBRIS | 86 | **1.000** |
+| NORMAL_TERRAIN | 30 | **0.000** |
+| DAMAGED_BRIDGE_INFRASTRUCTURE | 6 | **0.000** |
+
+The two zeros are not a training failure. **Those two classes are assigned by
+filename index arithmetic**, verified against all 1,380 labels with zero
+violations:
+
+    landslide pool:  index % 4  == 0  ->  NORMAL_TERRAIN                (800/800)
+    flood pool:      index % 12 == 0  ->  DAMAGED_BRIDGE_INFRASTRUCTURE (580/580)
+
+There are only two image pools, `flood_*` and `landslide_*`, and the two
+minority classes are sprinkled deterministically across them. An image
+labelled NORMAL_TERRAIN is a landslide photograph that happened to land on an
+index divisible by 4. 36 of 208 test images (17.3%) therefore carry a label
+uncorrelated with their content, which puts a hard ceiling of 0.827 on top-1 —
+the model scores 0.8269 and gets **172/172 of the honestly-labelled images
+right**. It is doing the best the data permits.
+
+**The confidence threshold cannot guard this.** All 30 NORMAL_TERRAIN test
+images come back ACTIVE_LANDSLIDE_DEBRIS at median confidence 0.794, against
+0.786 for genuine landslides — the distributions sit on top of each other. At
+0.90 the threshold rejects 0 of 30 mislabelled-normal images while rejecting
+82 of 86 true landslides. Raising it trades all the recall for none of the
+safety.
+
+One trap avoided along the way: `ImageFolder` assigns class indices
+**alphabetically**, so the trained model's order is
+`[ACTIVE_LANDSLIDE_DEBRIS, DAMAGED_BRIDGE_INFRASTRUCTURE, FLOODED_ROAD_OR_SUBMERGED,
+NORMAL_TERRAIN]` while `data.yaml` is `[NORMAL_TERRAIN, FLOODED_ROAD_OR_SUBMERGED,
+ACTIVE_LANDSLIDE_DEBRIS, DAMAGED_BRIDGE_INFRASTRUCTURE]`. Mapping a raw index
+through `data.yaml` would relabel every incident. Everything maps by name.
+
+### torch and xgboost cannot share a macOS process
+
+`/verify-incident` hung. No log line, no traceback, no timeout — the request
+simply never returned, and it reproduced under `TestClient` as readily as
+under uvicorn, while the identical inference ran standalone in 0.02 s.
+
+The process ends up with **three** copies of the OpenMP runtime: scikit-learn
+bundles one, torch bundles one, and xgboost dlopens Homebrew's keg-only build.
+On macOS arm64 they do not coexist, and the failure mode depends on load
+order:
+
+| order | result |
+|---|---|
+| `xgboost` → `torch`, then torch inference | **hangs forever** |
+| `torch` → `xgboost`, then xgboost predict | **SIGSEGV** |
+
+Both measured. `torch.set_num_threads(1)`, `KMP_DUPLICATE_LIB_OK=TRUE` and
+forcing `device="mps"` each convert the hang into a segfault rather than
+fixing it. Reordering cannot win, because each order breaks the other library.
+
+Fixed by not sharing: vision inference runs in a **spawn**-context worker
+process that imports torch and nothing else from the OpenMP set, while the
+parent keeps xgboost and never imports torch at all. `fork` would not work —
+the child would inherit the parent's loaded xgboost runtime, which is the
+situation being escaped.
+
+Cost: one warm worker process, 3.8 s on the first call, **19–37 ms warm**, and
+JPEG bytes crossing a pipe. The regression test runs hazard → vision → hazard
+in one process and pins that the hazard probability is byte-identical either
+side of the torch call.
+
+This is the same family of problem as R6's TensorFlow segfault under Anaconda
+3.13 — a native-library conflict that every declared Python dependency
+constraint is satisfied by.
+
+### Note left for DB-02
+
+DB-02 was probed before this chunk was reprioritised, and the finding changes
+how it must be written. `road_network.parquet`'s 238,170 rows are not 238,170
+road segments: each is a MultiLineString of **2-point segments**, 6,326,609 of
+them, 162,051 km in total. Loading them as edges would hand pgRouting a 6.3 M
+edge graph, which is unusable for interactive rerouting.
+
+The vertex structure, measured in PostGIS: 12,653,218 endpoints, 6,252,739
+distinct, of which 5,884,516 are degree-2 (pass-through), 235,074 degree-3,
+15,096 degree-4, and 117,924 degree-1 (dead ends). ~412,848 are junction
+candidates. So the ingest needs a merge-then-split pass — `ST_LineMerge` each
+way, then split at shared junction vertices — not a naive `ST_Dump`. The
+6,252,739 figure was independently reproduced by the road-index builder in
+Python, so it is not a PostGIS artefact.
+
+Staging tables `stage_road`, `stage_parts`, `stage_ep` and `stage_vertex` are
+left UNLOGGED in the dev database with that work in them.
+
+### Verification
+
+`/predict-hazard` for `{latitude: 27.5, longitude: 92.0}`, live against
+Open-Meteo:
+
+    predicted_class      LANDSLIDE_RISK
+    hazard_probability   0.944131        (high_risk, threshold 0.85)
+    class_probabilities  SAFE 0.0559 / LANDSLIDE 0.9154 / FLOOD 0.0287
+    elevation_m          4061.2      slope_deg   44.64
+    dist_to_river_m      1127.1      dist_to_road_m 709.2
+    rainfall 72h/24h/peak  76.8 / 8.6 / 1.2
+    terrain_region       arunachal_pradesh  (smaller sheet wins over assam)
+
+Sane on inspection: high Arunachal Himalaya, 4 km up a 45-degree slope. The
+709.2 m road distance was cross-checked against an independent PostGIS
+`ST_Distance` on the true line geometry (717.0 m — the 8 m gap is PostGIS's
+`<->` KNN ordering picking a marginally different edge, not a projection
+error).
+
+`/verify-incident` on a held-out landslide photo returns
+`verified: true, incident_kind: "landslide", confidence: 0.683` in 3.8 s cold
+and 19 ms warm; a flood photo returns `incident_kind: "flood"` at 0.793.
+
+35 tests pass, 1 skipped (the 503-without-weights path, unreachable now that
+the weights exist). None of them need the network.
 
 ---
 
@@ -448,12 +874,46 @@ unquoted `mkdir`, 0 files) deleted after a zero-file safety check.
 
 Decisions that need a human, ordered by what they block.
 
-1. **YOLO's 4 classes vs `incidents.kind`'s 3.** Widen the CHECK to include a
-   damaged-bridge kind and add an explicit rejection path for
-   `NORMAL_TERRAIN`, or map class 3 → `obstruction` at the API boundary and
-   accept the lossy mapping? `NORMAL_TERRAIN` must mean *unverified* — it
-   cannot be allowed to block an edge. *Blocks ML-06, API-03.*
-2. **What should the speed model actually predict?** At 4.0 m/s MAE, absolute
+1. **The hazard model's dominant feature is fabricated.** `slope_deg` carries
+   61% of the model's gain and correlates 0.309 with the terrain the service
+   actually samples; `aspect_deg` is uniform noise (R8). The model learned on
+   a class-conditioned synthetic slope and is served a real raster slope, so
+   `hazard_probability` is not a calibrated number — the service returns
+   `trustworthy: false` on every response. Options:
+
+   - **Rebuild the feature table from the rasters** at the training
+     coordinates and retrain. The labels stay synthetic, but at least
+     training and serving would agree on what the inputs mean. Cheapest
+     real improvement.
+   - **Drop `slope_deg`/`aspect_deg`** and retrain on the five features that
+     do reproduce. Accuracy will fall a long way — that fall is the honest
+     measure of what these features support.
+   - **Source a real landslide inventory** and retrain end to end. The only
+     option that makes the score mean what WEB-04 implies it means.
+
+   *Blocks any operational use of the risk overlay. Does not block wiring.*
+
+2. **The incident verifier cannot recognise "no incident".** `NORMAL_TERRAIN`
+   is the guard that stops a road being blocked on a photo of nothing, and it
+   is untrainable from the shipped dataset: its labels are `index % 4 == 0`,
+   not image content (R7). All 30 held-out NORMAL_TERRAIN images are returned
+   as landslides at confidence indistinguishable from real ones, so the
+   confidence threshold cannot substitute. Three ways forward:
+
+   - **Route verified incidents through dispatcher approval** before any edge
+     is blocked. WEB-05 already specifies an incident review panel, so this
+     costs no new UI — it makes an existing screen load-bearing. Cheapest,
+     and safe today.
+   - **Label a real NORMAL_TERRAIN set.** A few hundred NER road photos with
+     nothing wrong in them. The only fix that makes the model autonomous.
+   - **Ship the verifier as two classes** (flood / landslide) and treat
+     "which kind of incident" as its only job, with the "is there one at all"
+     decision made elsewhere.
+
+   The 4-vs-3 class mapping itself is settled: `DAMAGED_BRIDGE_INFRASTRUCTURE`
+   → `obstruction` (the edge is impassable either way) and `NORMAL_TERRAIN`
+   → null, in `config.YOLO_CLASS_TO_INCIDENT_KIND`. *Blocks API-03.*
+3. **What should the speed model actually predict?** At 4.0 m/s MAE, absolute
    speed from a bare IMU window is not accurate enough to drive dead
    reckoning (~240 m of drift per minute of blackout). Three options, in
    increasing order of change:
@@ -469,9 +929,25 @@ Decisions that need a human, ordered by what they block.
 
    This is a design decision, not a tuning knob — a bigger network will not
    close a 4 m/s gap. *Blocks MOB-06 integration.*
-3. **Which probability does `> 0.85` mean?** `P(is_hazard)` or
-   `P(hazard_type = LANDSLIDE_RISK)`? WEB-04 and ML-06 must agree.
-   *Blocks ML-04.*
+3. ~~**Which probability does `> 0.85` mean?**~~ **Resolved in R7.** The model
+   is 3-class, and `/predict-hazard` returns per-class probabilities alongside
+   `hazard_probability = 1 - P(SAFE_TERRAIN)`, which is what
+   `RISK_FLAG_THRESHOLD` compares against. WEB-04 reads that field.
+
+6. **The hazard model's labels are rule-generated, not observed** (R7).
+   `slope_deg` alone almost partitions the three classes on hard cutoffs, so
+   0.991 test accuracy measures rule-recovery, not landslide skill. The
+   serving pipeline is correct and reusable; what is missing is a label
+   source tied to real events. Does a validated NER landslide inventory exist
+   to retrain against, or is the synthetic model accepted as a demonstrator?
+   *Does not block anything — but it should not be quoted as accuracy.*
+
+7. **Is `rainfall_72h_mm` antecedent or forecast?** The service sums the
+   Open-Meteo *forecast* horizon, which is what workflow §5's pre-emptive
+   rerouting needs. Landslide triggering is better explained by rainfall that
+   has *already* fallen. The training features' provenance is unrecorded, so
+   the two could be on the same numeric scale with different meanings.
+   `WeatherClient` can supply either. *Affects ML-04 fidelity, not wiring.*
 4. **`CLAUDE.md` lives at `~/CLAUDE.md`**, so it loads as context for every
    project under the home directory, not just this one. Move to
    `~/drishti/CLAUDE.md`?

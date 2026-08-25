@@ -80,3 +80,10 @@ tmp/
 # Compiled test harness for the native bridge (rebuild with `make -C
 # mobile-app/native/test`). The stub headers and sources beside it ARE tracked.
 mobile-app/native/test/test_bridge
+
+# Ultralytics writes these into the CURRENT WORKING DIRECTORY -- the repo root
+# -- unless every call is given an explicit project/name. scripts/train_incident_yolo.py
+# passes them; these rules catch any invocation that forgets.
+/runs/
+/yolo*.pt
+/*.pt

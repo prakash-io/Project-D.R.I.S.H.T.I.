@@ -1,0 +1,40 @@
+# D.R.I.S.H.T.I. AI hybrid microservice (Epic 2).
+#
+# Python 3.12 on Homebrew, NOT the Anaconda 3.13 that the rest of the repo
+# defaults to -- see REVISION.md R6 for why that distribution is avoided here.
+#
+#   /opt/homebrew/opt/python@3.12/bin/python3.12 -m venv ai-services/.venv
+#   ai-services/.venv/bin/pip install -r ai-services/requirements.txt
+#
+# macOS: xgboost needs the OpenMP runtime, which is not bundled in the wheel.
+#   brew install libomp
+
+# --- serving
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32        # multipart/form-data for the photo upload
+httpx==0.28.1                   # Open-Meteo client
+pillow==12.3.0
+
+# --- risk model
+xgboost==3.4.1
+# Pinned exactly: feature_scaler.joblib was fitted under 1.9.0 and joblib
+# gives only a warning, not an error, when the unpickling version differs --
+# a silently mis-restored scaler biases every served prediction.
+scikit-learn==1.9.0
+joblib==1.5.3
+
+# --- spatial
+scipy==1.18.1                   # cKDTree; must unpickle the shipped indices
+rasterio==1.5.1                 # terrain GeoTIFF sampling
+shapely==2.1.2                  # WKB -> vertices when building the road index
+pyarrow==25.0.1
+pandas==3.0.5
+numpy==2.5.2
+pyyaml==6.0.3
+
+# --- vision (ML-05). Heavy: torch is ~1 GB. Only /verify-incident needs it,
+# and it is imported lazily so a hazard-only deployment never pays for it.
+ultralytics==8.4.128
+torch==2.13.0
+torchvision==0.28.0
