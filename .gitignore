@@ -87,3 +87,11 @@ mobile-app/native/test/test_bridge
 /runs/
 /yolo*.pt
 /*.pt
+
+# Compiled native test binaries. They are rebuilt by `make -C
+# mobile-app/native/test`, and an architecture-specific a.out in the tree is
+# worse than useless -- it is a binary nobody can review that shadows the
+# source next to it.
+mobile-app/native/test/test_bridge
+mobile-app/native/test/test_dead_reckoning
+*.o

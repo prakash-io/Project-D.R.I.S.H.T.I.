@@ -30,9 +30,10 @@ reverse-engineer. Newest revision first.
 | 2 | ML-05 YOLOv8 incident verifier | ⚠️ retrained 2-class, 1.000 top-1 — but trained on satellite/aerial, served ground-level photos, see R8 |
 | 2 | ML-06 `/predict-hazard`, `/verify-incident` | ✅ both verified end-to-end, 57 tests |
 | 3 | WEB-01…05 React + Deck.gl dashboard | ⬜ not started |
-| 4 | MOB-01…04, 07 React Native + C++ EKF | ⬜ not started |
-| 4 | MOB-05 TFLite velocity model | ⚠️ trained, but MAE 4.0 m/s is not fit for purpose — see R6 |
-| 4 | MOB-06 C++ TFLite→EKF bridge | ✅ written, compiles strict-clean, 25 tests pass |
+| 4 | MOB-04 C++ EKF (Eigen) | ✅ 79 checks; map matching cuts a 60 s blackout from 261,693 → 14.4 m² |
+| 4 | MOB-05 TFLite velocity model | ⚠️ trained (R6); used as a weak measurement per Q3, R = RMSE² |
+| 4 | MOB-06 TFLite→EKF bridge + map matching | ✅ verified against the real R*Tree extract |
+| 4 | MOB-01…03, 07 React Native client | ⚠️ scaffolded, NOT built — no mobile toolchain here, see R11 |
 
 Published at
 [prakash-io/Project-D.R.I.S.H.T.I.](https://github.com/prakash-io/Project-D.R.I.S.H.T.I.)
@@ -127,6 +128,123 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R11 — 2026-08-26 · Chunk 3: the edge engine and driver client (Epic 4)
+
+**Created**: `mobile-app/native/{Geo.h, DeadReckoning.{h,cpp}, MapMatcher.{h,cpp},
+EdgeEngineApi.{h,cpp}, IMU_Constants.h}`, `mobile-app/native/test/test_dead_reckoning.cpp`,
+`mobile-app/{App.jsx, package.json, README.md}`, `mobile-app/src/**`,
+`mobile-app/android/**`, `mobile-app/ios/DrishtiEdge.mm`
+
+**Modified**: `scripts/gen_model_header.py`, `mobile-app/native/test/Makefile`
+
+**Stack added**: Eigen 5.0.1, system sqlite3, Apple clang 21.
+
+**Tests**: 25 → **79 checks**, 0 failures, clean under
+`-Wconversion -Wsign-conversion -Wold-style-cast`.
+
+### 3.1 — MOB-05 was already done; what was missing was the header
+
+R6 trained the model and cloned IO-VNBD (564 CSVs, 1.7 GB). What Chunk 3 asked
+for and did not exist was `IMU_Constants.h`. `gen_model_header.py` now emits
+it, carrying the per-channel mean, the **variance** (std², emitted rather than
+computed at the call site — for gyro yaw the two differ by ~9x, which would
+silently mis-scale the process noise rather than fail), the model's rate, and:
+
+    kSpeedMeasurementVariance = 27.656638f   // = held-out RMSE^2
+
+That constant is the approved Q3 decision made concrete. The speed model's own
+error defines how little the filter trusts it — nothing is hand-tuned.
+
+The 100 Hz in the brief and the 10 Hz in the data are both real and both
+matter: IO-VNBD is 10 Hz, the handset is 100 Hz, so `ImuDecimator` averages 10
+raw samples into one. **Averaging, not sub-sampling** — at 100 Hz the
+accelerometer carries engine and road vibration well above 5 Hz, and taking
+every tenth sample aliases it straight into the band the model reads.
+
+### 3.2 — the EKF, and the bug the tests caught
+
+State is `[east_m, north_m, heading_rad, speed_mps]` on a local plane pinned
+to the last GNSS fix. Gyro yaw drives heading, the TFLite speed is a weak
+measurement on speed, and map matching corrects position and heading.
+
+Two decisions worth recording:
+
+* **Joseph-form covariance update**, not `(I − KH)P`. Over the thousands of
+  updates a long blackout produces, the short form loses symmetry to
+  floating-point error and the filter quietly stops being a filter.
+* **A road has a bearing but no direction.** Snapping to a northbound
+  carriageway while driving south must not spin the estimate 180°, so the
+  heading update takes whichever orientation is nearer the current heading.
+
+**The bug.** The first run failed one check: a 0.0 m/s reading pulled a 20 m/s
+estimate down to **9.96 m/s** — half way, which is not a weak measurement at
+all. The cause was the seed, not the update: `P(3,3)` was initialised to
+`speed_measurement_variance`, i.e. "our GNSS-derived speed is exactly as bad
+as the model", which makes the Kalman gain 0.5 by construction. A GNSS speed
+is good to well under 1 m/s, so the prior is now 1.0 m²/s² and the same
+reading moves the estimate to **19.14 m/s**. The prior still grows with
+`speed_process_noise`, so the model earns influence as the blackout lengthens
+— which is the correct behaviour rather than a tuned constant.
+
+No accuracy number would have caught that. It took an assertion about what the
+filter is *for*.
+
+### 3.3 — map matching is what actually saves the truck
+
+`MapMatcher` queries the 104 MB R*Tree extract, decodes WKB in place, and
+projects onto every segment of every candidate on a local plane so "nearest"
+is metres and not degrees — comparing raw degrees biases every match
+north-south by ~10% at these latitudes.
+
+The numbers say why it exists:
+
+| 60 s blackout | position variance |
+|---|---|
+| unaided dead reckoning | **261,693 m²** (~510 m) |
+| with a snap every 5 s | **14.4 m²** (~3.8 m) |
+
+That is the Q3 decision vindicated: the speed model cannot hold a truck on the
+map, and map matching can.
+
+A test bug hid this at first. The match cadence was keyed to the raw sample
+index (`step % 1000 == 0`), but the decimator emits on steps 9, 19, 29…, so
+the two never coincided and the end-to-end ran with **zero** map matches while
+still passing every other check. Cadence is now counted in decimated samples.
+
+### 3.4 — the C API, and why it exists
+
+Android binds through JNI and iOS through Objective-C++. Exposing the C++
+classes to each separately would put the ordering — decimate, predict, infer,
+match, then read — in two places to get wrong. `EdgeEngineApi` owns it once;
+both shims only marshal. The test suite exercises the C surface directly,
+including every entry point with a null handle, because a JNI call after
+teardown is a real sequence rather than a hypothetical one.
+
+### Verification (task 3.4)
+
+    50 mock IMU samples -> 5 EKF steps -> 10.0000 m due north at 20 m/s in 0.5 s
+    heading 90 deg goes EAST, 0 northward component
+    0.1 rad/s for 10 s -> 57.2958 deg
+    weak speed: 20.00 -> 19.14 m/s against a 0.0 m/s reading
+    R*Tree: 35 candidates within 200 m of Guwahati, snapped to edge 120894
+            at 32.80 m, bearing 99.8 deg
+    200 consecutive matches, no fault; an ocean query correctly matches nothing
+    60 s blackout: 330 m travelled, 10 map matches, final variance 14.4 m^2
+    C API: same 10.0000 m as the C++ path, null handles rejected throughout
+
+    79 checks, 0 failures
+
+### What is NOT verified
+
+The React Native layer is **scaffolded, not built**. There is no Android or
+iOS toolchain in this environment, so `npm install`, Gradle and CocoaPods have
+never run and the app has never launched on a device or emulator. The JS
+parses and the JNI/Objective-C++ shims are written against the same C API the
+tests exercise, but the RN layer is reviewed source, not a running app. The
+C++ engine underneath it is genuinely verified.
 
 ---
 
