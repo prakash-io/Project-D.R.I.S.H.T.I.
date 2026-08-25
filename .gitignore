@@ -76,3 +76,7 @@ tmp/
 # Editors
 .idea/
 .vscode/
+
+# Compiled test harness for the native bridge (rebuild with `make -C
+# mobile-app/native/test`). The stub headers and sources beside it ARE tracked.
+mobile-app/native/test/test_bridge

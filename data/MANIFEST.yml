@@ -229,24 +229,47 @@ datasets:
   - id: io_vnbd
     path: data/raw/imu/IO-VNBD
     format: csv_timeseries
-    sample_rate_hz: 100
+    sample_rate_hz: 10
+    size_gb: 1.7
+    csv_files: 564
     consumed_by: [MOB-05]
     required: true
-    status: PLACEHOLDER — real data not present
-    source: https://github.com/onyekpeu/IO-VNBD (GitHub archive download)
+    source: https://github.com/onyekpeu/IO-VNBD (git clone WITH git-lfs)
+    spec_says: 100 Hz
     notes: >
-      BLOCKER. All 564 CSVs are 132-byte Git LFS pointer files, not data —
-      a GitHub "Download ZIP" does not resolve LFS. The two archives inside
-      (Synchronised / Unsynchronised) are likewise 134-byte pointers standing
-      in for ~200 MB each. Only README_1.pdf is real.
+      Resolved 2026-08-25. The earlier copy was a GitHub "Download ZIP", which
+      does not resolve LFS: all 564 CSVs were 132-byte pointer stubs while the
+      tree looked complete. Re-fetched with `git lfs install && git clone`.
+      Verify this dataset by file SIZE, never by file count.
 
-      Fix: `git lfs install && git clone https://github.com/onyekpeu/IO-VNBD`,
-      or fetch the release archives directly. Verify by file size, not by
-      file count — the tree looks complete.
+      **Sampled at 10 Hz, not the 100 Hz the plan assumes.** Both halves are
+      resampled to a 10 Hz grid. The 50-timestep window is therefore 5
+      seconds of context, and a phone polling its IMU at 100 Hz must decimate
+      to 10 Hz before inference or every window covers 0.5 s of motion and
+      the model is being fed a distribution it never saw.
 
-      Trains the 1D-CNN mapping IMU vibration windows -> forward velocity.
-      Must be resampled to the phone's actual 100 Hz IMU cadence before
-      windowing.
+      Structure — only the synchronised half is usable, and it has two traps:
+
+        * "Synchronised V abd S datasets/" holds row-aligned S- (smartphone)
+          and V- (vehicle CAN bus) pairs, identical row counts, positional
+          join is correct.
+        * "Unsynchronised V and S Dataset/" is NOT row-aligned; there is no
+          correct way to attach a vehicle velocity to a phone IMU window.
+
+        1. Case is inconsistent across the halves: `S-Vta10.csv` pairs with
+           `V-vta10.csv`. Case-sensitive matching silently pairs 32 of 72
+           sessions and discards the rest.
+        2. Every session appears twice — once under Uncategorised/{S,V}-Dataset
+           and again under Categorised/<driver>/<session>/ — at slightly
+           different lengths. Loading both puts one drive in two splits and
+           leaks the target. scripts/train_idr_speed.py keeps the
+           uncategorised (untrimmed) copy.
+
+      Phone columns are ACCELEROMETER X/Y/Z (m/s², gravity NOT removed) and
+      GYROSCOPE Yaw/Pitch/Roll (rad/s). The phone's own `GPS SPEED (Kmh)` is
+      mislabelled — the values are m/s (median V/S ratio 3.58) and correlate
+      only 0.84 with the vehicle. Take the target from the V- file's
+      `Velocity (km/hr)` instead.
 
   # ================================================================= processed
   - id: landslide_features
@@ -373,13 +396,50 @@ datasets:
       verification runs synchronously in the incident POST path.
 
   - id: velocity_cnn
-    path: data/artifacts/edge/velocity-cnn.tflite
+    path: data/artifacts/edge/speed_model.tflite
     format: tflite
     consumed_by: [MOB-05, MOB-06]
     required: true
-    status: NOT TRAINED — blocked on io_vnbd
-    source: derived
+    source: scripts/train_idr_speed.py, trained on io_vnbd 2026-08-25
+    trained_by: scripts/train_idr_speed.py
+    files:
+      speed_model.tflite: full-int8, 34.9 KB — bundled into the app
+      speed_model_float.tflite: dynamic-range, 33.6 KB
+      speed_model.keras: unquantised, 300 KB
+      speed_model_meta.json: normalisation + quantisation params for C++
+    architecture: 1D-CNN, 21665 params, input [1, 50, 6] int8
+    accuracy:
+      test_mae_ms: 4.024
+      test_rmse_ms: 5.259
+      test_r2: 0.424
+      int8_mae_ms: 5.270
+      baseline_mae_ms: 6.093
     notes: >
       The only artifact that leaves the cloud — bundled into the React Native
       app binary, so size and quantisation are shipping constraints, not
       tuning knobs.
+
+      ACCURACY IS NOT YET FIT FOR PURPOSE. Held-out MAE is 4.0 m/s (14.5 km/h)
+      against a predict-the-mean baseline of 6.1 — the model learns something
+      real, but at 4 m/s of speed error the EKF accumulates roughly 240 m of
+      along-track position error per minute of blackout. See the open question
+      in REVISION.md before building on this.
+
+      The cause is structural, not a tuning problem: an accelerometer measures
+      acceleration, which integrates to a velocity *change*, not an absolute
+      velocity. The only absolute-speed signal in a bare IMU window is the
+      vibration spectrum, which varies with road surface, load and how the
+      phone is mounted. The fix is to change what the model predicts (a
+      per-window delta the EKF integrates, or feeding the previous EKF speed
+      back in as a 7th channel) rather than to grow the network.
+
+      Full int8 quantisation is currently a bad trade here: it costs 1.25 m/s
+      (+31%) and SAVES NOTHING — 34.9 KB int8 vs 33.6 KB dynamic-range,
+      because at 21665 params both already carry int8 weights and the integer
+      graph adds quantise/dequantise ops. Ship the float model unless the
+      target device has an integer-only NPU.
+
+      Normalisation constants are compiled into the app via
+      mobile-app/native/SpeedModelParams.h — regenerate it with
+      scripts/gen_model_header.py after EVERY retrain, or every prediction
+      carries a constant bias nothing in the build will catch.

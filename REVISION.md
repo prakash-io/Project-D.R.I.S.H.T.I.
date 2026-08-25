@@ -22,7 +22,8 @@ reverse-engineer. Newest revision first.
 | 2 | ML-01…06 FastAPI, XGBoost, YOLOv8 | ⬜ not started (data ready) |
 | 3 | WEB-01…05 React + Deck.gl dashboard | ⬜ not started |
 | 4 | MOB-01…04, 07 React Native + C++ EKF | ⬜ not started |
-| 4 | MOB-05/06 TFLite velocity model | 🚫 **blocked** — IO-VNBD is LFS stubs |
+| 4 | MOB-05 TFLite velocity model | ⚠️ trained, but MAE 4.0 m/s is not fit for purpose — see R6 |
+| 4 | MOB-06 C++ TFLite→EKF bridge | ✅ written, compiles strict-clean, 25 tests pass |
 
 Published at
 [prakash-io/Project-D.R.I.S.H.T.I.](https://github.com/prakash-io/Project-D.R.I.S.H.T.I.)
@@ -45,6 +46,10 @@ Versions here are what is installed and running, not what the plan proposed.
 | Redis | 7-alpine | BullMQ backend |
 | Node.js | 20.19.5 | Local runtime for Express |
 | Python | 3.13.9 (anaconda3) | FastAPI + geo tooling |
+| Python | 3.12.12 (Homebrew, `.venv/`) | **ML work only** — TF segfaults on Anaconda 3.13, see R6 |
+| TensorFlow / Keras | 2.21.0 / 3.15.1 | 1D-CNN training + TFLite export |
+| git-lfs | 3.7.0 | IO-VNBD ships its CSVs through LFS |
+| C++ | C++17 | Native EKF/TFLite bridge |
 
 **Host ports are remapped**: Postgres `5433`, Redis `6380`. An unrelated
 `demo_radar` stack already binds 5432/6379. Container-internal ports are
@@ -61,11 +66,19 @@ slowdown on `pgr_aStar` over the full 238k-edge graph.
 | `scikit-learn >= 1.9.0` | `feature_scaler.joblib` was pickled by 1.9.0. Loading under 1.7.2 warns and is not guaranteed to score correctly. |
 | CRS `EPSG:4326` everywhere | All supplied vectors *and* rasters are already 4326. Reproject at ingest, never at query time. |
 
-### Not yet installed
+### Two Python environments — use the right one
 
-`geopandas`, `rasterio`, `shapely`, `xgboost`, `torch`, `ultralytics`,
-`tensorflow`, `psycopg` — all needed, none present in the local env yet.
-Installed: `sklearn 1.7.2` (needs upgrade), `networkx 3.5`, `pyarrow`, `gdown`.
+| | interpreter | holds | use for |
+|---|---|---|---|
+| Anaconda base | 3.13.9 | `pandas`, `numpy`, `scipy`, `networkx`, `pyarrow`, `sklearn 1.7.2` | geo/data inspection |
+| `.venv/` | 3.12.12 | `tensorflow 2.21`, `keras`, `sklearn 1.9.0`, `pandas`, `pyyaml` | **all ML work** |
+
+TensorFlow segfaults on import under Anaconda 3.13 (R6), so anything touching
+a model must run through `.venv/bin/python`. That venv also happens to satisfy
+the `scikit-learn >= 1.9.0` pin the risk scaler needs.
+
+Still missing everywhere: `geopandas`, `rasterio`, `shapely`, `xgboost`,
+`torch`, `ultralytics`, `psycopg` — needed for DB-02, ML-02, ML-04 and ML-05.
 
 ---
 
@@ -90,6 +103,139 @@ data/raw/geo/road_network.parquet   238,170 rows, MultiLineString
                 ▼
         route_astar(start, end, risk_weight, heuristic_factor)
 ```
+
+The dark-zone path (MOB-05/06) is the other piece that exists today:
+
+```
+phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
+        │            ⚠ decimate from 100 Hz first — the model is trained at 10
+        ▼
+  EkfTFLiteBridge   ring buffer, 50 x 6  (5 s of context)
+        │           normalise (SpeedModelParams.h) → quantise int8
+        ▼
+  speed_model.tflite   21,665 params, 34 KB
+        │           dequantise → speed m/s, clamped at 0
+        ▼
+  C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
+```
+
+---
+
+## R6 — 2026-08-25 · IDR speed model (MOB-05) and the C++ bridge (MOB-06)
+
+**Created**
+- `scripts/train_idr_speed.py` — IO-VNBD → TFLite training pipeline
+- `scripts/gen_model_header.py` — emits the C++ constants from the model meta
+- `mobile-app/native/EKF_TFLite_Bridge.cpp` — TFLite → EKF bridge
+- `mobile-app/native/SpeedModelParams.h` — generated, do not hand-edit
+- `mobile-app/native/test/` — Makefile, TFLite stubs, 25-check unit test
+- `.venv/` — project Python env (gitignored)
+
+**Modified**: `data/MANIFEST.yml`, `.gitignore`
+
+**Stack added**: TensorFlow 2.21.0, Keras 3.15.1, git-lfs 3.7.0,
+Python 3.12.12 (Homebrew), C++17.
+
+### Environment
+
+TensorFlow **segfaults on import** (exit 139) under the Anaconda Python 3.13.9
+that everything else in this repo uses — every declared dependency constraint
+was satisfied, so it is a binary conflict inside that distribution, not a
+version mismatch. Worked around with a dedicated `.venv` on Homebrew Python
+3.12.12, where TF 2.21 imports cleanly. Side benefit: that venv carries
+scikit-learn 1.9.0, which is the version `feature_scaler.joblib` needs
+(see R4).
+
+### Data
+
+The previous IO-VNBD copy was LFS pointer stubs (R4). Re-cloned with
+`git lfs install && git clone`: 564 real CSVs, 1.7 GB. Dropped the two
+redundant `.zip` archives and the 1.5 GB `.git` LFS cache after checkout.
+
+Four dataset facts, each found by reading the files and each silently wrong if
+assumed otherwise:
+
+1. **It is 10 Hz, not the 100 Hz the plan assumes.** A 50-timestep window is
+   therefore 5 seconds. A phone polling at 100 Hz must decimate before
+   inference or every window covers 0.5 s and the model sees a distribution it
+   was never trained on.
+2. **The phone's `GPS SPEED (Kmh)` is in m/s** — median V/S ratio 3.58 — and
+   correlates only 0.84 with the vehicle. The target comes from the V- file's
+   correctly-labelled `Velocity (km/hr)`.
+3. **Filename case differs across halves**: `S-Vta10.csv` pairs with
+   `V-vta10.csv`. Case-sensitive matching pairs 32 of 72 sessions and discards
+   the rest without complaint.
+4. **Every session exists twice**, under `Uncategorised/` and `Categorised/`,
+   at different lengths. Loading both puts one drive in two splits and leaks
+   the target. The loader keeps the uncategorised (untrimmed) copy.
+
+A fifth trap cost a full training run: the two halves give the same three gyro
+channels different headers — `GYROSCOPE Yaw/Pitch/Roll` vs `GYROSCOPE X/Y/Z`,
+identical columns in identical positions. Columns are now resolved by pattern,
+which also sidesteps the inconsistent encoding of the `m/s²` and `°` suffixes.
+
+Splits are by **session**, never by window: consecutive windows overlap 98%, so
+a random split leaks the target outright.
+
+### Results — the model works, but is not fit for purpose yet
+
+72 sessions, 161,739 train / 161,267 val / 97,362 test windows. 21,665
+parameters. Held out 11 whole sessions:
+
+| | float | int8 |
+|---|---|---|
+| MAE | **4.024 m/s** (14.5 km/h) | 5.270 m/s |
+| RMSE | 5.259 m/s | — |
+| R² | 0.424 | — |
+| baseline (predict train mean) | 6.093 m/s | |
+
+It beats the baseline by 34%, so it is learning something real. But **4 m/s of
+speed error integrates to roughly 240 m of along-track position error per
+minute of blackout** — for a multi-minute NER valley that is not a usable
+primary velocity source.
+
+The cause is structural rather than a tuning shortfall. An accelerometer
+measures acceleration, which integrates to a velocity *change*, not an absolute
+velocity. The only absolute-speed signal in a bare IMU window is the vibration
+spectrum — road roughness, engine harmonics, suspension resonance — which
+varies with surface, load, and phone mounting. Growing the network will not fix
+this; changing what it predicts will. See Open Questions.
+
+**Full int8 quantisation is currently a bad trade.** It costs 1.25 m/s (+31%)
+and saves nothing: 34.9 KB int8 vs 33.6 KB dynamic-range, because at 21k
+parameters both already carry int8 weights and the integer graph only adds
+quantise/dequantise ops. It is worth it only on an integer-only NPU.
+
+One real bug found and fixed along the way: the int8 output range was
+calibrated from 400 uniformly-sampled windows, which missed the fast tail and
+capped the graph at 32.73 m/s while the data reaches 36.52 — every speed above
+that was being clipped. Calibration is now stratified across the speed range
+with the true extremes pinned.
+
+### C++ bridge
+
+`EKF_TFLiteBridge` holds a 50×6 ring buffer, normalises, quantises to int8,
+invokes, and dequantises. No allocation, locking, or exceptions on the
+per-sample path. Every failure is a status code, because a dead-reckoning
+filter must never be handed a fabricated speed: returning `kNotReady` and
+letting the EKF coast on its process model is always better than returning
+0.0, which tells the filter the truck has stopped.
+
+Compiles clean under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion
+-Wsign-conversion -Wold-style-cast`. `-Wconversion` caught eight genuine
+signedness bugs on the first pass, which is why the window constants are
+`std::size_t`.
+
+`mobile-app/native/test/` runs 25 assertions against a stubbed TFLite — enough
+to cover what is easiest to get wrong: that the ring buffer unrolls
+oldest-first (a rotated window is wrong in a way that still produces plausible
+numbers), that the quantise/dequantise round-trip is exact, that NaN and
+saturated samples are rejected, and that negative regression output clamps to
+zero rather than becoming negative speed. `make -C mobile-app/native/test run`.
+
+The normalisation constants are generated into `SpeedModelParams.h` rather than
+hand-copied — a retrain shifts the means, and a stale header biases every
+prediction by a constant no compiler can catch.
 
 ---
 
@@ -307,13 +453,29 @@ Decisions that need a human, ordered by what they block.
    `NORMAL_TERRAIN`, or map class 3 → `obstruction` at the API boundary and
    accept the lossy mapping? `NORMAL_TERRAIN` must mean *unverified* — it
    cannot be allowed to block an edge. *Blocks ML-06, API-03.*
-2. **Which probability does `> 0.85` mean?** `P(is_hazard)` or
+2. **What should the speed model actually predict?** At 4.0 m/s MAE, absolute
+   speed from a bare IMU window is not accurate enough to drive dead
+   reckoning (~240 m of drift per minute of blackout). Three options, in
+   increasing order of change:
+
+   - **Feed the previous EKF speed back in as a 7th input channel.** Turns an
+     absolute-speed regression into a correction problem, which is far better
+     conditioned. Cheapest change; the bridge already has the ring buffer.
+   - **Predict Δv per window and let the EKF integrate it.** Matches what the
+     IMU physically measures. Needs the EKF to own the speed state.
+   - **Accept it as a weak secondary measurement** with a large measurement
+     variance, and lean on map-matching against the cached road graph to
+     constrain along-track error.
+
+   This is a design decision, not a tuning knob — a bigger network will not
+   close a 4 m/s gap. *Blocks MOB-06 integration.*
+3. **Which probability does `> 0.85` mean?** `P(is_hazard)` or
    `P(hazard_type = LANDSLIDE_RISK)`? WEB-04 and ML-06 must agree.
    *Blocks ML-04.*
-3. **`CLAUDE.md` lives at `~/CLAUDE.md`**, so it loads as context for every
+4. **`CLAUDE.md` lives at `~/CLAUDE.md`**, so it loads as context for every
    project under the home directory, not just this one. Move to
    `~/drishti/CLAUDE.md`?
-4. **Rosetta emulation** on the Postgres container — accept for dev, or move
+5. **Rosetta emulation** on the Postgres container — accept for dev, or move
    to a native arm64 Postgres with a pgRouting build?
 
 ---
