@@ -139,7 +139,9 @@ def dhash(path: Path, size: int = 8) -> int | None:
     try:
         with Image.open(path) as im:
             g = im.convert("L").resize((size + 1, size), Image.LANCZOS)
-            px = list(g.getdata())
+            # tobytes() rather than getdata(): same row-major greyscale bytes,
+            # and getdata() is deprecated for removal in Pillow 14.
+            px = g.tobytes()
     except Exception:  # noqa: BLE001 - an undecodable image is simply excluded
         return None
     bits = 0
@@ -244,6 +246,12 @@ def main() -> int:
     ap.add_argument("--include-legacy", action="store_true",
                     help="add the satellite/aerial pool; reintroduces the "
                          "modality shortcut, see the docstring")
+    # Per-class source overrides. Present so the assembly logic can be
+    # exercised on a small fixture without waiting on a full harvest, and so
+    # a re-harvest into a new directory does not require editing SOURCES.
+    ap.add_argument("--flood-src", type=Path, nargs="*")
+    ap.add_argument("--landslide-src", type=Path, nargs="*")
+    ap.add_argument("--normal-src", type=Path, nargs="*")
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--test-frac", type=float, default=0.15)
     ap.add_argument("--dhash-radius", type=int, default=6,
@@ -255,6 +263,13 @@ def main() -> int:
 
     rng = random.Random(args.seed)
     sources = {k: list(v) for k, v in SOURCES.items()}
+    for cls, override in (
+        ("FLOODED_ROAD_OR_SUBMERGED", args.flood_src),
+        ("ACTIVE_LANDSLIDE_DEBRIS", args.landslide_src),
+        ("NORMAL_TERRAIN", args.normal_src),
+    ):
+        if override:
+            sources[cls] = list(override)
     if args.include_legacy:
         for cls, prefix in LEGACY.items():
             for split in SPLITS:

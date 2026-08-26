@@ -98,6 +98,21 @@ POOL_TO_CLASS = {
 }
 
 
+def show(path: Path) -> str:
+    """Repo-relative if it is inside the repo, absolute otherwise.
+
+    `--out`, `--cls-dir` and the run directory can all legitimately point
+    outside the tree -- a scratch directory during a smoke run, or the shared
+    checkout's `data/` when this runs from a worktree. A bare
+    `relative_to(ROOT)` raises there, and losing a finished training run to a
+    ValueError in a progress message is a poor trade.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def read_classes(src: Path) -> list[str]:
     """Class names in `data.yaml` order -- the order is the label contract."""
     spec = yaml.safe_load((src / "data.yaml").read_text())
@@ -251,7 +266,7 @@ def main() -> int:
         print("    WARNING: NORMAL_TERRAIN and DAMAGED_BRIDGE_INFRASTRUCTURE are "
               "assigned by filename index arithmetic and cannot be learned.")
 
-    print(f"==> building classification tree at {args.cls_dir.relative_to(ROOT)}")
+    print(f"==> building classification tree at {show(args.cls_dir)}")
     stats = build_classification_tree(args.src, args.cls_dir, classes,
                                       args.label_source)
     if args.prepare_only:
@@ -361,14 +376,14 @@ def train_and_export(args, classes: list[str], declared: list[str],
         "dataset": {s: stats[s]["counts"] for s in SPLITS},
         "test": {"top1": float(metrics.top1), "top5": float(metrics.top5),
                  "per_class": per_class},
-        "source_run": str(best.parent.parent.relative_to(ROOT)),
+        "source_run": show(best.parent.parent),
     }
     meta_path = args.out.with_name(args.out.stem + "_meta.json")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
-    print(f"\n==> wrote {args.out.relative_to(ROOT)} "
+    print(f"\n==> wrote {show(args.out)} "
           f"({args.out.stat().st_size / 1e6:.1f} MB)")
-    print(f"==> wrote {meta_path.relative_to(ROOT)}")
+    print(f"==> wrote {show(meta_path)}")
     print(f"==> total {time.time() - t0:.1f}s")
     return 0
 
