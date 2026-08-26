@@ -9,9 +9,10 @@
  * Raw CSS reads them as `rgb(var(--x))`.
  *
  * Archetype: section 2.2, Tactical Telemetry / CRT terminal. Dark substrate
- * exclusively. That is not a preference -- the basemap is CARTO dark-matter
- * (decision 13), so a light Swiss-print substrate would put paper-white
- * chrome around a black map. One substrate, committed.
+ * exclusively. That is not a preference -- the basemap renders dark (Bhuvan
+ * india3, inverted in index.css; it replaced CARTO dark-matter to get the
+ * Survey of India depiction of J&K), so a light Swiss-print substrate would
+ * put paper-white chrome around a black map. One substrate, committed.
  */
 
 :root {

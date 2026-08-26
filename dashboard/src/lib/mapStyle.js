@@ -1,11 +1,60 @@
 // Basemap style.
 //
-// CARTO's dark-matter style over OpenStreetMap data: free, no API key, no
-// account, and no Mapbox token to leak into a public repo. The plan named
-// Mapbox GL; using MapLibre with a CARTO style keeps the same rendering
-// engine lineage without a paid dependency, which matters for a demonstrator
-// that has to run on someone else's laptop.
-export const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+// Bhuvan (ISRO / NRSC) raster, NOT CARTO/OpenStreetMap.
+//
+// This is a territorial-accuracy requirement, not an aesthetic one. CARTO's
+// dark-matter style is rendered from OpenStreetMap, which draws Jammu &
+// Kashmir the way the international community does: the northern districts
+// are split off behind dotted "disputed" boundaries and labelled
+// GILGIT-BALTISTAN and AZAD KASHMIR. Both were verified directly against the
+// served tiles at z6 over 73-80E / 32-37N.
+//
+// That is not the boundary of India as depicted by the Survey of India, and a
+// platform built for an Indian agency cannot ship a dispatcher console that
+// draws it. Bhuvan's india3 layer is the national basemap: J&K and Ladakh
+// appear as complete Indian states with solid, undotted boundaries.
+//
+// Bhuvan is also keyless, which is what the CARTO choice was originally
+// protecting -- and the CARTO raster endpoint has since started stamping
+// "API KEY REQUIRED" across its tiles, so that protection had lapsed anyway.
+//
+// OSM is deliberately NOT stacked underneath as a gap filler the way it is in
+// the mobile client. Here it would be the wrong boundary showing through
+// exactly the holes we are trying to correct.
+//
+// Tiles come through our own backend rather than from Bhuvan directly, and
+// that indirection is REQUIRED, not a caching nicety: Bhuvan sends no
+// Access-Control-Allow-Origin, and MapLibre uploads raster tiles into a WebGL
+// texture, so the browser rejects every tile as `TypeError: Failed to fetch`
+// and renders an empty map with no HTTP error to point at. See
+// backend/src/routes/tiles.js. The mobile client keeps its direct URL because
+// MapLibre Native is not a browser and has no CORS to satisfy.
+import { API_URL } from './api';
+
+const BHUVAN_TILES = `${API_URL}/tiles/bhuvan/{z}/{x}/{y}.png`;
+
+export const BASEMAP_STYLE = {
+  version: 8,
+  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  sources: {
+    bhuvan: {
+      type: 'raster',
+      tiles: [BHUVAN_TILES],
+      tileSize: 256,
+      attribution: '© ISRO / NRSC Bhuvan',
+    },
+  },
+  layers: [
+    // NOTE: this colour looks inverted because it IS. The whole basemap canvas
+    // is flipped to dark in CSS (see `.maplibregl-canvas` in index.css), so
+    // every colour declared here must be written as its LIGHT pre-inversion
+    // value. #e8eef2 is Bhuvan's own off-map fill, so a missing tile inverts
+    // to precisely the same dark tone as the sea and the land beyond the
+    // border rather than punching a hole in the map.
+    { id: 'void', type: 'background', paint: { 'background-color': '#e8eef2' } },
+    { id: 'bhuvan-layer', type: 'raster', source: 'bhuvan', minzoom: 0, maxzoom: 19 },
+  ],
+};
 
 // Guwahati. The largest city in the NER and the natural hub for the corridors
 // this platform routes over.

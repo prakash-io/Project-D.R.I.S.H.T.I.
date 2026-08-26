@@ -18,6 +18,7 @@ import { incidentsRouter } from './routes/incidents.js';
 import { syncRouter } from './routes/sync.js';
 import { routingRouter } from './routes/routing.js';
 import { riskRouter } from './routes/risk.js';
+import { tilesRouter } from './routes/tiles.js';
 import { closeQueue } from './queues/burstSync.js';
 
 export function createApp() {
@@ -56,6 +57,7 @@ export function createApp() {
 
   app.use('/incidents', incidentsRouter);
   app.use('/risk', riskRouter);
+  app.use('/tiles', tilesRouter);
   app.use('/sync', syncRouter);
   app.use('/', routingRouter);
 

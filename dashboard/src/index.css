@@ -17,6 +17,44 @@
   }
   /* Telemetry digits must not reflow as they tick. */
   data, output, samp, dd { font-variant-numeric: tabular-nums; }
+
+  /* ---------------------------------------------------------------------
+     Bhuvan is a near-white national basemap and this is a dark console, so
+     the basemap canvas is flipped rather than dimmed. Dimming a white raster
+     only greys it: the boundary hairlines are DARK on white, so reducing
+     brightness drags them toward the background and the borders disappear at
+     exactly the moment they matter. Inverting keeps the contrast and simply
+     reverses its polarity -- borders and labels come out light on dark.
+     hue-rotate(180deg) then walks the hues back, so vegetation stays green
+     and rivers stay blue instead of landing on magenta and orange.
+
+     Scoped to `.maplibregl-canvas` ON PURPOSE. deck.gl draws the trucks, the
+     risk corridors and the routes into its OWN canvas (#deckgl-overlay,
+     a sibling), and those colours are semantic -- a red corridor inverted is
+     a green one. This selector must never be widened to the map container.
+
+     saturate/brightness then push the basemap back down the hierarchy. NER is
+     densely vegetated, and at full strength the inverted raster comes back as
+     a wall of bright green that is louder than the telemetry drawn on top of
+     it -- the basemap ends up competing with the risk corridors and the truck
+     markers for the dispatcher's eye. 0.35/0.75 was picked by comparing
+     rendered candidates over Kamrup/Meghalaya: it is the point where terrain
+     recedes to a muted ground while district boundaries stay crisp and water
+     is still legible as water. Lower (0.20) flattens forest and river into
+     one grey and loses that distinction.
+
+     Consequence for anyone editing src/lib/mapStyle.js: colours declared in
+     that style are written as their LIGHT pre-inversion values. */
+  .maplibregl-canvas {
+    filter: invert(1) hue-rotate(180deg) saturate(0.35) brightness(0.75);
+  }
+
+  /* The attribution is real DOM over the flipped canvas, so it is NOT
+     inverted with it and would otherwise sit dark-on-dark. */
+  .maplibregl-ctrl-attrib {
+    background: rgb(var(--p-ink-100) / 0.72) !important;
+  }
+  .maplibregl-ctrl-attrib a { color: rgb(var(--p-rule-100)); }
 }
 
 @layer components {

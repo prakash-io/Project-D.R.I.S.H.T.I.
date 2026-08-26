@@ -171,10 +171,39 @@ async function main() {
   canvases >= 1 ? ok('deck.gl / maplibre canvas mounted', `${canvases} canvas`) 
                 : fail('canvas', 'none mounted');
 
-  const tiles = requests.filter((r) => r.url.includes('basemaps.cartocdn.com'));
+  const tiles = requests.filter((r) => r.url.includes('/tiles/bhuvan/'));
   const tilesOk = tiles.filter((r) => r.status === 200).length;
-  tilesOk > 0 ? ok('OSM/CARTO basemap tiles fetched', `${tilesOk} responses, no API key`)
+  tilesOk > 0 ? ok('Bhuvan basemap tiles fetched', `${tilesOk} responses, no API key`)
               : fail('basemap tiles', `${tiles.length} requests, ${tilesOk} ok`);
+
+  // Territorial-accuracy regression guard. OSM-derived basemaps draw Jammu &
+  // Kashmir with dotted "disputed" boundaries and the labels GILGIT-BALTISTAN
+  // and AZAD KASHMIR, which is not the Survey of India depiction and cannot
+  // ship in a console built for an Indian agency. Bhuvan replaced CARTO for
+  // this reason, so a single reverted import is a compliance regression and
+  // not merely a style change -- assert the old source is gone, not just that
+  // the new one is present.
+  const osmish = requests.filter((r) => /cartocdn\.com|tile\.openstreetmap\.org/.test(r.url));
+  osmish.length === 0
+    ? ok('no OSM/CARTO basemap requests', 'J&K drawn from the national basemap')
+    : fail('OSM/CARTO basemap still requested', `${osmish.length} requests, e.g. ${osmish[0].url}`);
+
+  // The basemap is a near-white raster flipped to dark in CSS. If that rule
+  // is dropped the console renders a white map under white chrome; if it is
+  // widened past .maplibregl-canvas it inverts deck.gl too and every semantic
+  // colour lies -- a red risk corridor comes back green.
+  const flip = await cdp.eval(`(() => {
+    const c = document.querySelector('.maplibregl-canvas');
+    if (!c) return 'NO CANVAS';
+    const f = getComputedStyle(c).filter;
+    const d = document.querySelector('#deckgl-overlay');
+    const df = d ? getComputedStyle(d).filter : 'none';
+    return JSON.stringify({ base: f, deck: df });
+  })()`);
+  const flipped = JSON.parse(flip.startsWith('{') ? flip : '{}');
+  (flipped.base?.includes('invert') && !String(flipped.deck).includes('invert'))
+    ? ok('basemap inverted, deck.gl untouched', flipped.base)
+    : fail('basemap inversion scoping', flip);
 
   // ------------------------------------------------------ 4.2 live telemetry
   console.log('\n4.2  Live telemetry over Socket.IO');
