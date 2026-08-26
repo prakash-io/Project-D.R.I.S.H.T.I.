@@ -8,8 +8,93 @@
     margin: 0;
   }
   body {
-    @apply bg-panel text-slate-200 antialiased;
-    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    @apply bg-base text-dim antialiased;
+    /* Section 3.2: monospace is the interface's default voice, not an
+       exception applied to code. Structural headers opt *out* into
+       font-display, rather than every readout opting in to mono. */
+    font-family: theme('fontFamily.mono');
+    font-variant-numeric: tabular-nums;
+  }
+  /* Telemetry digits must not reflow as they tick. */
+  data, output, samp, dd { font-variant-numeric: tabular-nums; }
+}
+
+@layer components {
+  /* ---------------------------------------------------------- section 7
+     Simulated analog degradation. Both effects are pointer-events:none and
+     are never mounted over the deck.gl canvas: a scanline gradient across
+     a live map reduces legibility of the one layer that must stay exact,
+     and the whole point of the chrome is to frame that canvas, not veil it. */
+
+  /* CRT electron-beam sweep. Chrome compartments only. */
+  .crt {
+    position: relative;
+  }
+  .crt::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0 2px,
+      rgb(0 0 0 / 0.30) 2px 3px
+    );
+  }
+
+  /* Mechanical noise: one global grain so every compartment shares the
+     same physical surface. feTurbulence inlined -- no network fetch. */
+  .grain::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* Section 8.1: grid gap of exactly one hairline over a contrasting
+     parent generates razor-thin dividers without per-child borders. */
+  .hairgrid {
+    display: grid;
+    gap: var(--hairline);
+    background: rgb(var(--border-hairline));
+  }
+
+  /* Section 6: registration crosshair at grid intersections. */
+  .crosshair::before {
+    content: '+';
+    position: absolute;
+    color: rgb(var(--text-muted));
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  /* Section 3.2 metadata voice. Applied only to decorative/structural
+     text -- never to a label that verify.mjs matches, because Chrome's
+     innerText applies text-transform and those regexes are case-sensitive. */
+  .meta {
+    @apply font-mono uppercase tracking-term text-[10px] text-muted;
+  }
+
+  /* Keyboard focus. An outline rather than a ring: outline needs no
+     offset colour, so one rule is correct on every surface -- panel,
+     raised card, and the red Approve button alike. `focus-visible` so a
+     mouse click does not leave the outline behind. */
+  .focus-ring:focus-visible {
+    outline: 2px solid rgb(var(--focus-ring));
+    outline-offset: 2px;
+  }
+
+  /* Section 6: thick diagonal hazard stripes. */
+  .hazard-stripe {
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgb(var(--accent-alert)) 0 6px,
+      transparent 6px 12px
+    );
   }
 }
 
@@ -17,6 +102,8 @@
    to stop the attribution and zoom buttons glowing white on a dark map. */
 .maplibregl-ctrl-attrib,
 .maplibregl-ctrl-group {
-  @apply !bg-surface !text-muted;
+  @apply !bg-panel !text-muted !rounded-none;
+  border: var(--hairline) solid rgb(var(--border-hairline));
 }
 .maplibregl-ctrl-attrib a { @apply !text-muted; }
+.maplibregl-ctrl-group button + button { border-top-color: rgb(var(--border-hairline)); }

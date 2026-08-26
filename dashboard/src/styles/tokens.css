@@ -1,0 +1,117 @@
+/* D.R.I.S.H.T.I. design tokens — Tactical Telemetry substrate.
+ *
+ * Three layers, in this order, and nothing skips a layer:
+ *
+ *     primitive (raw channels) -> semantic (purpose) -> component (per part)
+ *
+ * Values are space-separated RGB channels, not hex, so Tailwind's
+ * `rgb(var(--x) / <alpha-value>)` can vary opacity from one definition.
+ * Raw CSS reads them as `rgb(var(--x))`.
+ *
+ * Archetype: section 2.2, Tactical Telemetry / CRT terminal. Dark substrate
+ * exclusively. That is not a preference -- the basemap is CARTO dark-matter
+ * (decision 13), so a light Swiss-print substrate would put paper-white
+ * chrome around a black map. One substrate, committed.
+ */
+
+:root {
+  /* ---------------------------------------------------------- primitive */
+  /* Deactivated CRT. Never pure #000000 -- the panels need somewhere
+     darker than themselves to recede to. */
+  --p-ink-000:  10  10  10;   /* #0A0A0A base substrate      */
+  --p-ink-050:  15  15  15;   /* #0F0F0F                      */
+  --p-ink-100:  22  22  22;   /* #161616 raised compartment   */
+  --p-ink-200:  30  30  30;   /* #1E1E1E pressed / inset      */
+  --p-rule-100: 42  42  42;   /* #2A2A2A hairline             */
+  --p-rule-200: 61  61  61;   /* #3D3D3D active hairline      */
+
+  /* White phosphor, and its decayed states. */
+  --p-phos-100: 234 234 234;  /* #EAEAEA primary readout      */
+  --p-phos-200: 168 168 168;  /* #A8A8A8 secondary            */
+  --p-phos-300: 138 138 138;  /* #8A8A8A metadata. Measured:  */
+                              /* #7A7A7A scored 4.22:1 on the */
+                              /* raised surface and .meta is  */
+                              /* 10px -- normal-size text, so  */
+                              /* AA wants 4.5. This clears it. */
+
+  /* Aviation / hazard red. The single alert accent (section 4). */
+  --p-hazard-100: 230  25  25; /* #E61919 fills/borders only  */
+  --p-hazard-200: 255  42  42; /* #FF2A2A hot                 */
+  /* Hazard red splits into three roles because one value cannot serve
+   * all three at AA. Measured against the raised surface:
+   *   fill/border  #E61919  4.12:1 -- fine, non-text needs 3:1
+   *   as TEXT      #E61919  3.89:1 -- fails, so text uses -300
+   *   under white  #E61919  3.86:1 -- fails, so the button uses -400
+   * -300 is #F85149, which is also exactly the colour MapView draws risk
+   * corridors with ([248,81,73]). The alert text and the hazard lines on
+   * the map are now the same red by measurement, not by coincidence. */
+  --p-hazard-300: 248  81  73; /* #F85149 text on dark, 5.40:1 */
+  --p-hazard-400: 210  13  13; /* #D20D0D under #EAEAEA, 4.59:1 */
+  --p-hazard-500: 184  10  10; /* #B80A0A pressed, 5.31:1       */
+
+  /* Terminal green. Section 4 permits exactly one element. Ours is the
+     telemetry link indicator -- the one thing a dispatcher checks before
+     trusting anything else on screen. It appears nowhere else. */
+  --p-terminal:  74 246  38;  /* #4AF626                      */
+
+  /* Deliberate deviation from section 4's "red is the only accent".
+   * These two encode GNSS fix vs. dead reckoning and are drawn by the
+   * deck.gl ScatterplotLayers, which are out of scope for this pass. If
+   * the chrome dropped them the legend would contradict the map, so they
+   * are carried into the token system at their exact layer values rather
+   * than being re-invented. See MapView.jsx getFillColor. */
+  --p-gnss:      88 166 255;  /* #58A6FF matches [88,166,255] */
+  --p-deadrec:  210 153  34;  /* #D29922 matches [210,153,34] */
+
+  /* ----------------------------------------------------------- semantic */
+  --bg-base:        var(--p-ink-000);
+  --bg-panel:       var(--p-ink-050);
+  --bg-raised:      var(--p-ink-100);
+  --bg-inset:       var(--p-ink-200);
+
+  --border-hairline: var(--p-rule-100);
+  --border-active:   var(--p-rule-200);
+
+  --text-primary:   var(--p-phos-100);
+  --text-secondary: var(--p-phos-200);
+  --text-muted:     var(--p-phos-300);
+
+  --accent-alert:      var(--p-hazard-100);  /* fills, borders, meter cells */
+  --accent-alert-hot:  var(--p-hazard-200);
+  --accent-alert-text: var(--p-hazard-300);  /* any alert word on a dark bg */
+
+  /* Keyboard focus. Phosphor rather than the accent: a focus ring must be
+     legible on every surface including the red button, where a red ring
+     would vanish. 15.93:1 on panel. */
+  --focus-ring: var(--p-phos-100);
+
+  --status-live:    var(--p-terminal);
+  --status-down:    var(--p-hazard-100);
+  --status-gnss:    var(--p-gnss);
+  --status-deadrec: var(--p-deadrec);
+
+  /* ---------------------------------------------------------- component */
+  --rail-bg:            var(--bg-panel);
+  --rail-mark:          var(--text-muted);
+
+  --toggle-bg:          var(--bg-raised);
+  --toggle-bg-on:       var(--bg-inset);
+  --toggle-border:      var(--border-hairline);
+  --toggle-text:        var(--text-muted);
+  --toggle-text-on:     var(--text-primary);
+
+  --card-bg:            var(--bg-raised);
+  --card-border:        var(--border-hairline);
+
+  --btn-approve-bg:     var(--p-hazard-400);
+  --btn-approve-bg-hot: var(--p-hazard-500);
+  --btn-approve-text:   var(--p-phos-100);
+
+  --btn-ghost-border:   var(--border-active);
+  --btn-ghost-text:     var(--text-muted);
+
+  /* Structural constants. Section 5: no border-radius anywhere, and one
+     hairline width used everywhere so compartments read as one machine. */
+  --hairline: 1px;
+  --radius:   0px;
+}

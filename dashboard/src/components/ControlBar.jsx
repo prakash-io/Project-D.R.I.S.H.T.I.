@@ -1,21 +1,42 @@
 // Layer toggles and connection state (WEB-01, WEB-04).
+//
+// Frozen strings: the toggle labels "Trucks" and "Disruption Overlay", and
+// the "<n> packets" readout. verify.mjs matches all three against
+// document.body.innerText with case-sensitive regexes, and Chrome's
+// innerText applies text-transform -- so these three cannot be uppercased in
+// CSS, only framed. Structural voice is carried by the brackets and the
+// surrounding .meta text instead.
 import React from 'react';
 
-function Toggle({ label, checked, onChange, accent = 'live', badge }) {
+// Section 6: ASCII framing replaces the conventional pill/switch. The bracket
+// pair is what signals state, so the control reads as a terminal field.
+function Toggle({ label, checked, onChange, tone, badge }) {
+  // Explicit class pairs, never interpolated. The previous implementation
+  // built `border-${accent}/50` at runtime; Tailwind's scanner only sees
+  // literal strings, so those classes were never generated and the "on"
+  // state rendered unstyled.
+  const on = {
+    danger: 'border-danger bg-danger/10 text-phosphor',
+    live: 'border-live bg-live/10 text-phosphor',
+  }[tone];
+  const dot = { danger: 'bg-danger', live: 'bg-live' }[tone];
+
   return (
     <button
       type="button"
+      aria-pressed={checked}
       onClick={() => onChange(!checked)}
-      className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition
-        ${checked
-          ? `border-${accent}/50 bg-${accent}/10 text-slate-100`
-          : 'border-edge bg-surface text-muted hover:text-slate-300'}`}
+      className={`focus-ring group flex items-center gap-2 border px-3 py-1.5
+                  font-mono text-[11px] tracking-term transition-colors
+        ${checked ? on : 'border-edge bg-surface text-muted hover:border-edge-active hover:text-dim'}`}
     >
-      <span className={`h-2 w-2 rounded-full ${checked ? `bg-${accent}` : 'bg-edge'}`} />
-      {label}
+      <span aria-hidden className={`text-[11px] ${checked ? 'text-current' : 'text-muted/50'}`}>[</span>
+      <span aria-hidden className={`h-1.5 w-1.5 ${checked ? dot : 'bg-edge-active'}`} />
+      {label}{' '}
       {badge !== undefined && (
-        <span className="font-mono text-[10px] text-muted">{badge}</span>
+        <output className="font-mono text-[11px] text-current">{badge}</output>
       )}
+      <span aria-hidden className={`text-[11px] ${checked ? 'text-current' : 'text-muted/50'}`}>]</span>
     </button>
   );
 }
@@ -27,40 +48,52 @@ export default function ControlBar({
   riskCount, riskLoading, threshold,
 }) {
   return (
-    <header className="flex items-center gap-4 border-b border-edge bg-panel px-4 py-2.5">
-      <div className="flex items-baseline gap-2">
-        <h1 className="text-sm font-bold tracking-[0.2em] text-slate-100">D.R.I.S.H.T.I.</h1>
-        <span className="text-[10px] uppercase tracking-widest text-muted">
-          Command Center
-        </span>
+    <header className="crt relative z-10 flex items-stretch border-b border-edge bg-panel">
+      {/* Section 3.1: the wordmark is the one piece of macro typography in
+          the chrome -- heavy, crushed tracking, welded into a block. */}
+      <div className="flex flex-col justify-center border-r border-edge px-4 py-2">
+        <h1 className="font-display text-[19px] font-black leading-none
+                       tracking-crush text-phosphor">
+          D.R.I.S.H.T.I.
+        </h1>
+        <span className="meta mt-1 leading-none">Command Center</span>
       </div>
 
-      <div className="flex items-center gap-2 ml-2">
+      <div className="flex items-center gap-2 px-4">
+        <span className="meta hidden lg:inline">Layers</span>
         <Toggle label="Trucks" checked={showTrucks} onChange={setShowTrucks}
-                accent="live" badge={truckCount} />
+                tone="live" badge={truckCount} />
         <Toggle
           label="Disruption Overlay"
           checked={showRisk}
           onChange={setShowRisk}
-          accent="danger"
+          tone="danger"
           badge={riskLoading ? '…' : riskCount}
         />
         {showRisk && (
-          <span className="text-[11px] text-muted">
-            segments at risk &gt; {(threshold * 100).toFixed(0)}%
+          <span className="meta hidden xl:inline">
+            &gt;&gt;&gt; risk &gt; {(threshold * 100).toFixed(0)}%
           </span>
         )}
       </div>
 
-      <div className="ml-auto flex items-center gap-4 text-xs">
-        <span className="font-mono text-muted">{packets} packets</span>
-        <span className="flex items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${
-            connected ? 'bg-ok animate-pulse' : 'bg-danger'}`} />
-          <span className={connected ? 'text-ok' : 'text-danger'}>
-            {connected ? 'TELEMETRY LIVE' : 'DISCONNECTED'}
+      {/* telemetry readout */}
+      <div className="ml-auto flex items-stretch">
+        <div className="flex flex-col justify-center border-l border-edge px-4 py-2 text-right">
+          <span className="meta leading-none">Ingest</span>
+          <span className="mt-1 font-mono text-[11px] leading-none text-dim">
+            {packets} packets
           </span>
-        </span>
+        </div>
+
+        <div className="flex items-center gap-2 border-l border-edge px-4 py-2">
+          <span aria-hidden
+                className={`h-2 w-2 ${connected ? 'bg-ok animate-pulse' : 'bg-danger'}`} />
+          <span className={`font-mono text-[11px] uppercase tracking-term
+                            ${connected ? 'text-ok' : 'text-danger-text'}`}>
+            {connected ? 'Telemetry Live' : 'Disconnected'}
+          </span>
+        </div>
       </div>
     </header>
   );
