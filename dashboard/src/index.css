@@ -88,6 +88,149 @@
     outline-offset: 2px;
   }
 
+  /* -------------------------------------------------------- Level-1 layout
+     A floating compartment: a panel that sits OVER the map rather than
+     beside it. See tokens.css for why the alpha is 0.92 and not lower.
+
+     `backdrop-filter` is a progressive enhancement here, not a dependency --
+     the alpha alone already clears AA over the brightest Bhuvan tile, so a
+     browser without backdrop support loses the depth cue and keeps all of
+     the legibility. */
+  .glass {
+    position: relative;
+    background-color: rgb(var(--glass-bg) / var(--glass-alpha));
+    border: var(--hairline) solid rgb(var(--border-hairline));
+    border-radius: var(--radius-glass);
+    box-shadow: var(--glass-shadow);
+  }
+
+  /* The specular hairline. An inset top highlight is what separates "pane of
+     glass catching light" from "translucent grey box" -- it implies a
+     thickness and an edge. Kept to 10% white: any stronger and it reads as a
+     1px border, which is a different material entirely. */
+  .glass::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      rgb(var(--glass-edge) / var(--glass-edge-a)) 0,
+      rgb(var(--glass-edge) / 0) 40%
+    );
+    /* Behind the panel's own content, above its background. */
+    z-index: 0;
+  }
+  .glass > * { position: relative; z-index: 1; }
+
+  /* Blur is a progressive enhancement, but here it is load-bearing for
+     LEGIBILITY, not just depth: --glass-alpha is tuned assuming the blur is
+     doing most of the work of destroying the detail underneath. A browser
+     without backdrop-filter therefore gets a near-opaque fallback rather than
+     the translucent value, so text stays readable over a bright tile. */
+  .glass { background-color: rgb(var(--glass-bg) / 0.94); }
+  @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+    .glass {
+      background-color: rgb(var(--glass-bg) / var(--glass-alpha));
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+      backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    }
+  }
+
+  /* Clip children to the rounded shell. Without this a full-bleed child --
+     the tab strip, an incident photo -- squares off the corners the glass
+     just rounded. */
+  .glass-clip { overflow: hidden; border-radius: var(--radius-glass); }
+
+  /* ------------------------------------------------------------- controls
+     One class for every pressable thing that floats over the map. 44px is a
+     floor, not a target (Apple HIG); these are pressed under time pressure
+     and sometimes on a control-room touch display. */
+  .glass-ctl {
+    min-height: var(--ctl-min-h);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: var(--radius-ctl);
+    cursor: pointer;
+    transition: background-color 160ms ease, border-color 160ms ease,
+                transform 160ms ease, box-shadow 160ms ease;
+  }
+  /* A press that moves 1px reads as a physical button without shifting
+     anything around it -- transform only, so no reflow and no CLS. */
+  .glass-ctl:active { transform: translateY(1px); }
+  @media (prefers-reduced-motion: reduce) {
+    .glass-ctl { transition: none; }
+    .glass-ctl:active { transform: none; }
+  }
+
+  /* Registration brackets on a floating panel's corners. Purely structural:
+     they give an edge that is otherwise a 1px hairline over a moving map
+     enough definition to read as a fixed instrument. */
+  .bracket { position: relative; }
+  .bracket::before,
+  .bracket::after {
+    content: '';
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    pointer-events: none;
+    border-color: rgb(var(--border-active));
+  }
+  .bracket::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid; border-left: 1px solid;
+  }
+  .bracket::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid; border-right: 1px solid;
+  }
+
+  /* The live-link heartbeat. One element, per section 4's single-green rule.
+     Held still for anyone who asked the OS to stop animations. */
+  .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-dot { animation: none; }
+  }
+
+  /* A checkbox that actually shows a tick.
+     Colour alone is not the state carrier -- the glyph is -- which keeps the
+     control readable for anyone who cannot separate the two greys. */
+  .toggle-box {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid rgb(var(--border-active));
+    border-radius: 4px;
+    background-color: rgb(var(--bg-inset));
+    display: inline-grid;
+    place-content: center;
+    transition: background-color 140ms ease, border-color 140ms ease;
+  }
+  .toggle-box::before {
+    content: '';
+    width: 10px;
+    height: 10px;
+    transform: scale(0);
+    transition: transform 120ms ease;
+    background-color: rgb(var(--bg-inset));
+    /* A checkmark, as a clip path -- no icon font, no SVG request. */
+    clip-path: polygon(14% 47%, 0 61%, 40% 100%, 100% 22%, 86% 9%, 38% 71%);
+  }
+  .toggle-box:checked {
+    background-color: rgb(var(--text-primary));
+    border-color: rgb(var(--text-primary));
+  }
+  .toggle-box:checked::before { transform: scale(1); }
+  @media (prefers-reduced-motion: reduce) {
+    .toggle-box, .toggle-box::before { transition: none; }
+  }
+
   /* Section 6: thick diagonal hazard stripes. */
   .hazard-stripe {
     background-image: repeating-linear-gradient(

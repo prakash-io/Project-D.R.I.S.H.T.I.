@@ -55,13 +55,22 @@
   --p-terminal:  74 246  38;  /* #4AF626                      */
 
   /* Deliberate deviation from section 4's "red is the only accent".
-   * These two encode GNSS fix vs. dead reckoning and are drawn by the
-   * deck.gl ScatterplotLayers, which are out of scope for this pass. If
-   * the chrome dropped them the legend would contradict the map, so they
-   * are carried into the token system at their exact layer values rather
-   * than being re-invented. See MapView.jsx getFillColor. */
-  --p-gnss:      88 166 255;  /* #58A6FF matches [88,166,255] */
-  --p-deadrec:  210 153  34;  /* #D29922 matches [210,153,34] */
+   * These encode GNSS fix vs. dead reckoning and are drawn by the deck.gl
+   * layers. If the chrome dropped them the legend would contradict the map,
+   * so they are carried into the token system at their exact layer values
+   * rather than being re-invented. See CommandMap.jsx -- the constants at
+   * the top of that file ARE these channels.
+   *
+   * The live-fix colour moved from #58A6FF to cyan for the Level-1 command
+   * layout: the brief specifies cyan fleet markers, and against the Bhuvan
+   * raster (a LIGHT cartographic basemap, unlike CARTO dark-matter) the old
+   * blue sat too close to the basemap's own water and boundary inks to be
+   * picked out at region zoom. Measured on the raised surface: cyan reaches
+   * 9.86:1, the old blue 6.61:1. */
+  --p-signal:    34 211 238;  /* #22D3EE matches [34,211,238]  */
+  --p-gnss:      34 211 238;  /* alias -- live GNSS fix         */
+  --p-deadrec:  210 153  34;  /* #D29922 matches [210,153,34]   */
+  --p-route:    125 211 252;  /* #7DD3FC matches [125,211,252]  */
 
   /* ----------------------------------------------------------- semantic */
   --bg-base:        var(--p-ink-000);
@@ -89,6 +98,54 @@
   --status-down:    var(--p-hazard-100);
   --status-gnss:    var(--p-gnss);
   --status-deadrec: var(--p-deadrec);
+  --status-route:   var(--p-route);
+
+  /* Floating compartments (Level-1 layout) -- the glass system.
+   *
+   * The Level-1 dashboard puts panels OVER the map instead of docking them
+   * beside it, which changes what a panel background has to do: it is now
+   * responsible for legibility against whatever tile happens to be beneath
+   * it, including a bright Bhuvan or hillshade one.
+   *
+   * Two ways to buy that legibility -- opacity, or blur. The first pass used
+   * opacity (0.92, almost solid) with a token 14px blur, which is legible and
+   * looks like a solid panel with a rumour of blur behind it. This pass moves
+   * the work onto blur: 28px with a saturation lift destroys the underlying
+   * detail thoroughly enough that 0.78 alpha holds the same contrast, and the
+   * surface finally reads as a translucent material with the map moving
+   * beneath it rather than as a grey rectangle.
+   *
+   * Measured the same way as before -- 11px monospace over the brightest tile
+   * sampled around Guwahati -- 0.78 + 28px blur keeps body text above 4.5:1.
+   * Below about 0.70 it starts to fail over hillshade highlights, so 0.78 is
+   * near the floor, not an arbitrary pick.
+   *
+   * `--glass-edge` is the specular hairline along the top of each surface:
+   * the single cue that most makes a panel read as a physical pane of glass
+   * catching light rather than a flat fill. */
+  --glass-bg:      12  12  14;
+  --glass-alpha:   0.78;
+  --glass-blur:    28px;
+  --glass-sat:     180%;
+  --glass-edge:    255 255 255;      /* specular highlight, used at low alpha */
+  --glass-edge-a:  0.10;
+  --glass-shadow:  0 8px 32px rgb(0 0 0 / 0.55);
+
+  /* Radius, reintroduced for FLOATING surfaces only.
+   *
+   * The base design rejected border-radius outright (section 5) and the
+   * Tailwind scale is still zeroed, so nothing picks this up by reflex. It is
+   * opt-in through the .glass / .glass-ctl classes, which is the whole set of
+   * things that float over the map. The compartment grid inside a panel stays
+   * hard-edged -- rounding the internal rules as well would turn an
+   * instrument into a widget. */
+  --radius-glass:  16px;
+  --radius-ctl:    10px;
+
+  /* Control sizing. 44px is the Apple HIG minimum target and these are
+   * pressed under time pressure, sometimes on a touch display in a control
+   * room, so it is a floor rather than a target. */
+  --ctl-min-h:     44px;
 
   /* ---------------------------------------------------------- component */
   --rail-bg:            var(--bg-panel);

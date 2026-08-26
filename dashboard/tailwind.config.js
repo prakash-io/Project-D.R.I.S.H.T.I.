@@ -37,6 +37,11 @@ export default {
         ok:     token('--status-live'),
         warn:   token('--status-deadrec'),
         live:   token('--status-gnss'),
+        // `signal` is the same channel as `live`, named for the role rather
+        // than the fix type: it is the accent for anything currently
+        // transmitting, whether that is a truck marker or the link readout.
+        signal: token('--status-gnss'),
+        route:  token('--status-route'),
       },
       fontFamily: {
         // Section 3.2: monospace carries all telemetry, metadata and IDs.

@@ -171,20 +171,62 @@ async function main() {
   canvases >= 1 ? ok('deck.gl / maplibre canvas mounted', `${canvases} canvas`) 
                 : fail('canvas', 'none mounted');
 
-  const tiles = requests.filter((r) => r.url.includes('basemaps.cartocdn.com'));
-  const tilesOk = tiles.filter((r) => r.status === 200).length;
-  tilesOk > 0 ? ok('OSM/CARTO basemap tiles fetched', `${tilesOk} responses, no API key`)
-              : fail('basemap tiles', `${tiles.length} requests, ${tilesOk} ok`);
+  // Either basemap counts. Bhuvan (bhuvan-vec1) is the primary sovereign
+  // raster; CARTO dark-matter is the fallback the app switches to on its own
+  // when Bhuvan cannot be reached, which on a laptop behind a firewall is the
+  // normal case. Asserting only CARTO would fail on a correctly-working
+  // Bhuvan, and asserting only Bhuvan would fail on a correct fallback --
+  // what this check is actually for is "the map got tiles from somewhere and
+  // needed no API key".
+  // Counted per host, and reported per host.
+  //
+  // A single "from Bhuvan" label here would be actively misleading: the app
+  // probes one Bhuvan tile on every load to decide whether MapLibre can use
+  // it, and that probe returns 200 at the network level even when the CORS
+  // header that MapLibre needs is absent -- so a run that rendered the CARTO
+  // fallback would still report Bhuvan as the source. Naming both is the only
+  // version of this line that cannot lie about what is on screen.
+  const count = (host) =>
+    requests.filter((r) => r.url.includes(host) && r.status === 200).length;
+  const bhuvan = count('bhuvan-vec1.nrsc.gov.in');
+  const carto = count('basemaps.cartocdn.com');
+  const esri = count('server.arcgisonline.com');
+  const total = bhuvan + carto + esri;
+
+  total > 0
+    ? ok('basemap tiles fetched',
+      `${total} responses (bhuvan ${bhuvan}, carto ${carto}, esri ${esri}), no API key`)
+    : fail('basemap tiles', 'no basemap host returned a 200');
 
   // ------------------------------------------------------ 4.2 live telemetry
   console.log('\n4.2  Live telemetry over Socket.IO');
   const readPackets = () => cdp.eval(
     `document.body.innerText.match(/(\\d+)\\s+packets/)?.[1] ?? '0'`);
-  const first = Number(await readPackets());
-  first > 0 ? ok('telemetry packets received', `${first}`) : fail('packets', 'none received');
+  // Wait for the first packet rather than sampling once.
+  //
+  // The counter now starts at a true zero: it counts fixes that arrived over
+  // the SOCKET, and the roster seed (GET /trucks) deliberately does not
+  // increment it, so that the status bar cannot claim telemetry on a dead
+  // link. That makes this check honest and also makes it a race -- the mock
+  // stream computes a pgRouting route before it emits anything, which can
+  // take longer than the fixed settle above. Polling asserts the same
+  // property without depending on how quickly the producer warms up.
+  let first = 0;
+  for (let attempt = 0; attempt < 30 && first === 0; attempt += 1) {
+    first = Number(await readPackets());
+    if (first === 0) await sleep(1000);
+  }
+  first > 0 ? ok('telemetry packets received', `${first}`)
+            : fail('packets', 'none received in 30s');
 
+  // The Transponder tab is the default panel and prints the roster size.
+  //
+  // Case-INsensitive on purpose. The `.meta` class applies
+  // `text-transform: uppercase`, and Chrome's innerText returns the
+  // TRANSFORMED text -- so "8 units" in the JSX arrives here as "8 UNITS".
+  // This is the same trap tokens.css warns about for the frozen strings.
   const trucksBadge = await cdp.eval(
-    `document.body.innerText.match(/Trucks\\s*(\\d+)/)?.[1] ?? '0'`);
+    `document.body.innerText.match(/(\\d+)\\s+units?/i)?.[1] ?? '0'`);
   Number(trucksBadge) > 0 ? ok('trucks rendered on the map', `${trucksBadge} markers`)
                           : fail('trucks', 'no markers');
 
@@ -201,14 +243,29 @@ async function main() {
 
   // -------------------------------------------- 4.3 disruption overlay toggle
   console.log('\n4.3  Disruption Overlay and Incident Review');
-  const toggled = await cdp.eval(`(() => {
-    const b = [...document.querySelectorAll('button')]
-      .find((x) => x.textContent.includes('Disruption Overlay'));
-    if (!b) return 'no-button';
-    b.click();
+  // The Level-1 layout tabs the floating sidebar, so the overlay switch is
+  // reached by selecting the Layers tab first. Inactive panels are `hidden`,
+  // which removes them from innerText as well as from the tab order -- so
+  // every assertion below a tab switch depends on the switch landing.
+  const openedLayers = await cdp.eval(`(() => {
+    const t = [...document.querySelectorAll('[role="tab"]')]
+      .find((x) => x.textContent.trim().startsWith('Layers'));
+    if (!t) return 'no-tab';
+    t.click();
     return 'clicked';
   })()`);
-  toggled === 'clicked' ? ok('Disruption Overlay toggle clicked') 
+  openedLayers === 'clicked' ? ok('Layers tab opened') : fail('Layers tab', openedLayers);
+  await sleep(500);
+
+  const toggled = await cdp.eval(`(() => {
+    const label = [...document.querySelectorAll('label')]
+      .find((x) => x.textContent.includes('Predictive risk'));
+    const box = label?.querySelector('input[type="checkbox"]');
+    if (!box) return 'no-toggle';
+    box.click();
+    return 'clicked';
+  })()`);
+  toggled === 'clicked' ? ok('Disruption Overlay toggle clicked')
                         : fail('overlay toggle', toggled);
   await sleep(4000);
 
@@ -218,13 +275,25 @@ async function main() {
     : fail('/risk/segments', JSON.stringify(riskCalls));
 
   const segCount = await cdp.eval(
-    `document.body.innerText.match(/Disruption Overlay\\s*(\\d+)/)?.[1] ?? '0'`);
+    `document.body.innerText.match(/(\\d+)\\s+segment\\(s\\)\\s+at or above/)?.[1] ?? '0'`);
   Number(segCount) > 0 ? ok('high-risk segments rendered', `${segCount} segments > 85%`)
                        : fail('risk segments', 'none rendered');
   await cdp.shot('dash_overlay.png');
   ok('screenshot captured', 'dash_overlay.png');
 
   // ------------------------------------------------------ approve the incident
+  // Back to the Review tab: the queue lives there now, and a hidden panel
+  // contributes nothing to innerText.
+  const openedReview = await cdp.eval(`(() => {
+    const t = [...document.querySelectorAll('[role="tab"]')]
+      .find((x) => x.textContent.trim().startsWith('Review'));
+    if (!t) return 'no-tab';
+    t.click();
+    return 'clicked';
+  })()`);
+  openedReview === 'clicked' ? ok('Review tab opened') : fail('Review tab', openedReview);
+  await sleep(800);
+
   const before = await cdp.eval(
     `document.body.innerText.match(/(\\d+)\\s+awaiting approval/)?.[1] ?? '0'`);
   Number(before) > 0 ? ok('incident awaiting approval', `${before} in the queue`)

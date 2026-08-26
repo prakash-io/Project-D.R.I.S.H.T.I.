@@ -9,8 +9,15 @@
 // and the "Edge <n> blocked" result line. verify.mjs asserts on all three --
 // and it requires the button's trimmed textContent to START with "Approve
 // Reroute", so no ASCII decoration may precede that label inside the button.
-import React, { useState } from 'react';
-import { incidentPhotoUrl } from '../lib/api';
+//
+// Level-1 layout note: this panel now reads its queue from commandStore and
+// runs approve/reject itself, instead of receiving them as props. The socket
+// only ever says "something changed" -- the queue is re-FETCHED on that signal
+// (useDispatcherFeeds), never patched locally, so this panel cannot disagree
+// with the database about what is still awaiting a decision.
+import React, { useCallback, useState } from 'react';
+import { incidentPhotoUrl, approveIncident, rejectIncident } from '../lib/api';
+import { useCommandStore } from '../store/commandStore';
 
 const KIND_LABEL = {
   landslide: 'Landslide',
@@ -48,28 +55,57 @@ function Row({ term, children }) {
   );
 }
 
-export default function IncidentPanel({ incidents, approve, reject, busyId, error }) {
+export default function IncidentPanel() {
+  const incidents = useCommandStore((s) => s.queue);
+  const setQueue = useCommandStore((s) => s.setQueue);
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(null);
   const [lastResult, setLastResult] = useState(null);
 
+  // Removed from the local queue the moment the backend confirms, so a second
+  // click cannot double-approve while the refetch is still in flight.
+  const drop = useCallback((id) => {
+    const store = useCommandStore.getState();
+    setQueue(store.queue.filter((i) => i.id !== id));
+  }, [setQueue]);
+
   const onApprove = async (incident) => {
+    setBusyId(incident.id);
     try {
-      const result = await approve(incident.id);
+      const result = await approveIncident(incident.id);
+      drop(incident.id);
+      setError(null);
       setLastResult({
         ok: true,
         text: `Edge ${result.incident.blocked_edge} blocked · `
           + `${result.reroutes.length} truck(s) rerouted`,
       });
     } catch (e) {
+      setError(e.message);
       setLastResult({ ok: false, text: e.message });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const reject = async (id) => {
+    setBusyId(id);
+    try {
+      await rejectIncident(id);
+      drop(id);
+      setError(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
     }
   };
 
   return (
-    <aside className="crt relative flex h-full w-[380px] shrink-0 flex-col
-                      border-l border-edge bg-panel">
-      <header className="border-b border-edge px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="shrink-0 border-b border-edge px-4 py-3">
         <div className="flex items-baseline justify-between">
-          <h2 className="font-display text-[15px] font-black uppercase
+          <h2 className="font-display text-[13px] font-black uppercase
                          leading-none tracking-crush text-phosphor">
             Incident Review
           </h2>
@@ -98,7 +134,7 @@ export default function IncidentPanel({ incidents, approve, reject, busyId, erro
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {incidents.length === 0 && (
           <div className="grid h-full place-items-center px-6 text-center">
             <div>
@@ -171,9 +207,9 @@ export default function IncidentPanel({ incidents, approve, reject, busyId, erro
                   type="button"
                   disabled={busyId === incident.id}
                   onClick={() => onApprove(incident)}
-                  className="focus-ring flex-1 bg-approve px-3 py-2.5 font-mono
-                             text-[11px] font-bold uppercase tracking-term text-phosphor
-                             transition-colors hover:bg-approve-hot disabled:opacity-40"
+                  className="focus-ring glass-ctl flex-1 bg-approve px-4 font-mono
+                             text-[12px] font-bold uppercase tracking-term text-phosphor
+                             hover:bg-approve-hot disabled:opacity-40"
                 >
                   {busyId === incident.id ? 'Approving…' : 'Approve Reroute'}
                 </button>
@@ -181,10 +217,9 @@ export default function IncidentPanel({ incidents, approve, reject, busyId, erro
                   type="button"
                   disabled={busyId === incident.id}
                   onClick={() => reject(incident.id)}
-                  className="focus-ring border border-edge-active bg-surface px-3 py-2.5
-                             font-mono text-[11px] uppercase tracking-term text-muted
-                             transition-colors hover:border-muted hover:text-dim
-                             disabled:opacity-40"
+                  className="focus-ring glass-ctl border border-edge-active bg-surface px-4
+                             font-mono text-[12px] uppercase tracking-term text-muted
+                             hover:border-muted hover:text-dim disabled:opacity-40"
                 >
                   Reject
                 </button>
@@ -193,6 +228,6 @@ export default function IncidentPanel({ incidents, approve, reject, busyId, erro
           ))}
         </div>
       </div>
-    </aside>
+    </div>
   );
 }
