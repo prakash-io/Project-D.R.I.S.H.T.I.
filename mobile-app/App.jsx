@@ -3,7 +3,14 @@
 // Wires the four pieces together: GNSS when online, the C++ edge engine when
 // not, WatermelonDB in between, and Bhashini reading reroutes aloud.
 import React, { useEffect, useRef, useState } from 'react';
-import { SafeAreaView, StatusBar, Text, View, StyleSheet } from 'react-native';
+import { SafeAreaView, StatusBar, View, ScrollView, StyleSheet } from 'react-native';
+
+import StatusBanner from './src/ui/StatusBanner';
+import SpeedCluster from './src/ui/SpeedCluster';
+import PositionReadout from './src/ui/PositionReadout';
+import SyncQueue from './src/ui/SyncQueue';
+import RerouteAlert from './src/ui/RerouteAlert';
+import { t } from './src/ui/tokens';
 import RNFS from 'react-native-fs';
 
 import { createDatabase } from './src/db';
@@ -90,40 +97,34 @@ export default function App() {
     };
   }, []);
 
+  // Derived, not stored: `mode` is already the authority on connectivity, and
+  // a second piece of state could disagree with it.
+  const connected = mode === 'online';
+
   return (
     <SafeAreaView style={styles.root}>
-      <StatusBar barStyle="light-content" />
-      <View style={styles.card}>
-        <Text style={styles.label}>MODE</Text>
-        <Text style={[styles.mode, mode === 'dark-zone' && styles.dark]}>
-          {mode.toUpperCase()}
-        </Text>
-        {fix && (
-          <>
-            <Text style={styles.coord}>
-              {fix.latitude.toFixed(6)}, {fix.longitude.toFixed(6)}
-            </Text>
-            <Text style={styles.meta}>
-              {(fix.speed_mps ?? fix.speed ?? 0).toFixed(1)} m/s
-              {fix.covariance_m2 ? ` · ±${Math.sqrt(fix.covariance_m2).toFixed(0)} m` : ''}
-              {fix.map_matched ? ' · snapped' : ''}
-            </Text>
-          </>
-        )}
-        <Text style={styles.meta}>{queued} points queued for sync</Text>
-        {alert && <Text style={styles.alert}>{alert}</Text>}
-      </View>
+      <StatusBar barStyle="light-content" backgroundColor={t.color.bgPanel} />
+
+      <StatusBanner mode={mode} connected={connected} />
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        // The alert band is pinned below; keep the last row clear of it.
+        contentInsetAdjustmentBehavior="automatic"
+      >
+        <SpeedCluster fix={fix} />
+        <PositionReadout fix={fix} />
+        <SyncQueue queued={queued} mode={mode} />
+      </ScrollView>
+
+      <RerouteAlert alert={alert} onDismiss={() => setAlert(null)} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0b0f14', justifyContent: 'center', padding: 24 },
-  card: { backgroundColor: '#141b23', borderRadius: 16, padding: 24 },
-  label: { color: '#5b6b7c', fontSize: 12, letterSpacing: 2 },
-  mode: { color: '#4ade80', fontSize: 32, fontWeight: '700', marginBottom: 16 },
-  dark: { color: '#fbbf24' },
-  coord: { color: '#e2e8f0', fontSize: 20, fontVariant: ['tabular-nums'] },
-  meta: { color: '#94a3b8', fontSize: 14, marginTop: 6 },
-  alert: { color: '#f87171', fontSize: 16, marginTop: 16, fontWeight: '600' },
+  root: { flex: 1, backgroundColor: t.color.bgBase },
+  scroll: { flex: 1 },
+  content: { paddingBottom: t.space.xl },
 });
