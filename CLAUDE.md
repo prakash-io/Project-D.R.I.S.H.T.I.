@@ -75,3 +75,112 @@ This document lists every discrete task required to build the platform, mapped t
 - [ ] **MOB-05:** Train a 1D-CNN **TensorFlow Lite** model on the **IO-VNBD dataset** to map noisy IMU vibration patterns to a predicted forward vehicle speed. Load this `.tflite` model locally on the phone.
 - [ ] **MOB-06:** Feed the TFLite speed predictions and gyroscope data into the C++ EKF to calculate Dead Reckoning coordinates during a GPS blackout.
 - [ ] **MOB-07:** Integrate the **Bhashini TTS API** (via `bhashini-translator` or REST) so that when the Node.js backend pushes a reroute event, the app automatically reads the translated alert aloud to the driver hands-free.
+
+---
+
+# Session Handoff — read this first
+
+Everything above is the **plan** (what the platform should be). Everything
+below is the **state** (what actually exists as of 2026-08-26). Where the two
+disagree, below is the one that was checked against a running system.
+`REVISION.md` carries the full history and the reasoning; this is the digest.
+
+## 1. State & stack
+
+**Chunks 1-5 complete, approved and merged to `main`.** Those are all the
+chunks the plan defines; there is no chunk 6 or 7. Next is **Phase 3: Live
+Cloud Deployment and Android Hardware Testing**, which is the first work that
+needs infrastructure and a handset rather than this laptop.
+
+| Component | Where | Status |
+|---|---|---|
+| AI service | `ai-services/` (own `.venv`, py3.12) | FastAPI :8000, 59 tests pass |
+| Backend | `backend/` (Node 20) | Express+Socket.IO :4000, BullMQ :6380, PostGIS :5433 |
+| Edge engine | `mobile-app/native/` | Eigen EKF + map-matcher + flat C API, 54 checks pass |
+| Driver client | `mobile-app/src/` | services + UI written, **never built or rendered** |
+| Dashboard | `dashboard/` | Vite+React+deck.gl/MapLibre :5173, 22/22 checks |
+
+Road graph: **486,784 edges / 412,914 nodes**. Mobile extract: 104 MB
+SQLite+R*Tree. Migrations 001-007, ledgered and idempotent.
+
+Verification commands:
+
+    ai-services/.venv/bin/python -m pytest ai-services/tests -q   # 59
+    make -C mobile-app/native/test run                            # 54
+    cd dashboard && node verify.mjs                               # 22
+    cd backend && node test/e2e_verify.mjs                        # full loop
+    cd backend && node simulate_dark_zone_mission.mjs             # Chunk 5
+
+The last one needs the burst-sync worker running (`cd backend && npm run
+worker`) -- it is a separate process from `npm start`, and without it the
+queue simply stalls with 0 failures, which reads as a hang rather than an
+error.
+
+## 2. What Phase 3 has to deal with
+
+Nothing below is a regression. Each is a limitation that was accepted with a
+reason, and each becomes real work once there is a handset and a cloud.
+
+* **The React Native app has never been built or rendered.** There is no
+  mobile toolchain on this machine. `src/ui/` is verified only by parse:
+  every file parses, every JSX tag is bound, every import resolves. Layout,
+  font fallback and `fontVariant` on Android are all unverified. This is the
+  single largest unknown going into hardware testing.
+* **The TFLite 1D-CNN has never executed.** `libtensorflowlite` is an
+  NDK/CocoaPods artefact, so `native/test/` stubs it and the Chunk 5 mission
+  injects the speed measurement at the model's own held-out error (RMSE
+  5.259 m/s). The EKF and the R*Tree map matching are exercised for real; the
+  speed model is not. First run on a handset is its first run anywhere.
+* **Open Q8: the vision model is out of distribution on its real input.**
+  Trained on satellite and aerial imagery, served ground-level driver photos.
+  Dispatcher approval makes this safe, not correct. Closing it needs a few
+  hundred ground-level NER road photos per class, including a genuine
+  "nothing wrong here" class. Blocks autonomous verification, not the demo.
+* **Hazard labels are synthetic.** Demonstrator only. The depth-2 baseline
+  prints on every training run so the headline accuracy is never mistaken for
+  forecasting skill.
+* **No `oneway` column**, so routing is bidirectional.
+* **`dashboard/verify.mjs` needs a pending incident seeded before it runs**
+  and consumes one per run. It cleans up after itself now -- it clears what it
+  approved and asserts 0 blocked edges -- but it does not create its own
+  fixture. Seed with `POST /incidents/report`.
+
+## 3. Active MCP servers and tools
+
+`filesystem`, `postgres`, `playwright` — all connected. Skills: `superpowers`,
+`ui-ux-pro-max` (+6 siblings), 14 taste skills, `web-design-guidelines`.
+CLI: `uipro`.
+
+## 4. Critical decisions — do not relitigate
+
+These were each established by measurement. Reversing one without new evidence
+will reintroduce a bug that has already been found and fixed once.
+
+1. **KDTrees hold projected metres, not degrees**:
+   `x = lon*111139*cos(25.5°)`, `y = lat*111139`. A raw degree query returns a
+   neighbour ~400 km away without erroring. Distances are always haversine.
+2. **The training parquet's 8 features are already RobustScaler output.**
+   Only lat/lon are raw. Re-scaling desyncs training from serving silently.
+3. **torch and xgboost cannot share a macOS process** (three OpenMP runtimes).
+   Vision runs in a spawned worker; the parent never imports torch.
+4. **Vision model is 2-class.** NORMAL_TERRAIN and DAMAGED_BRIDGE labels are
+   filename index arithmetic, verified 1380/1380. `requires_human_review` is
+   always true.
+5. **Only `verified` blocks an edge.** Reports land in
+   `pending_dispatcher_approval`; `AUTO_BLOCK_ON_AI_VERDICT=0` must stay 0.
+6. **The 999999 blocked cost lives in the `routable_edges` view.** Never
+   `UPDATE road_edges.cost` — clearing an incident must restore routing exactly.
+7. **Hazard features were rebuilt from rasters AND relabelled.** Moving the
+   feature without the label inverts the model (it called a 1.8° valley floor
+   a landslide while scoring 0.907).
+8. **The speed model is a weak measurement**: R = RMSE² = 27.66, seed prior
+   1.0. Map-matching is what bounds drift (261,693 → 14.4 m² over 60 s).
+9. **Decimate IMU 100→10 Hz by averaging**, not sub-sampling — sub-sampling
+   aliases vibration into the model's band.
+10. **Mobile uses SQLite + R\*Tree, not SpatiaLite** — React Native cannot load
+    `mod_spatialite`.
+11. **Rainfall uses the forecast window, located via `hourly.time`.** Never
+    slice from index 0: the series starts at 00:00 UTC, not now.
+12. **Truck interpolation is a lag, never extrapolation.** Drawing ahead of the
+    last fix puts a truck where no telemetry placed it.
+13. **Basemap is CARTO dark over OSM** — no API key, no Mapbox token.
