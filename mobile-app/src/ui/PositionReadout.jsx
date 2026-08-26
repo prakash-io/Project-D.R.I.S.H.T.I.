@@ -21,10 +21,15 @@ function Row({ label, value, tone, mono = true }) {
   );
 }
 
-export default function PositionReadout({ fix }) {
+/// Fixes arrive at 1 Hz online and 10 Hz while dead reckoning. Three seconds
+/// without one is already several vehicle-lengths of unaccounted movement, so
+/// that is where the readout stops claiming to be current.
+const STALE_AFTER_MS = 3000;
+
+export default function PositionReadout({ fix, hud, ageMs }) {
   if (!fix) {
     return (
-      <View style={styles.wrap}>
+      <View style={[styles.wrap, hud && styles.hudSurface]}>
         <Text style={styles.caption}>POSITION</Text>
         <View style={styles.empty}>
           <Text style={styles.emptyGlyph}>+</Text>
@@ -39,15 +44,32 @@ export default function PositionReadout({ fix }) {
   const cov = fix.covariance_m2 ?? fix.covarianceM2 ?? 0;
   const sigma = cov ? Math.sqrt(cov) : null;
   const matched = Boolean(fix.map_matched ?? fix.mapMatched);
+  const stale = Number.isFinite(ageMs) && ageMs > STALE_AFTER_MS;
+  const seconds = Math.floor((ageMs ?? 0) / 1000);
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, hud && styles.hudSurface]}>
       <Text style={styles.caption}>POSITION</Text>
 
-      <Text style={styles.coord} accessibilityLabel={
-        `Latitude ${fix.latitude.toFixed(5)}, longitude ${fix.longitude.toFixed(5)}`}>
+      <Text
+        style={[styles.coord, stale && styles.coordStale]}
+        accessibilityLabel={
+          `Latitude ${fix.latitude.toFixed(5)}, longitude ${fix.longitude.toFixed(5)}`
+          + (stale ? `. Position is ${seconds} seconds old and no longer current.` : '')}
+      >
         {fix.latitude.toFixed(6)}, {fix.longitude.toFixed(6)}
       </Text>
+
+      {/* A position with no age reads as "now" forever. When the fixes stop --
+          GNSS lost, sensors wedged, the engine stalled -- the last one stays
+          on screen looking live, which is the single most dangerous thing this
+          screen could imply. So the age is stated whenever it is not current,
+          in words, not by colour alone. */}
+      {stale ? (
+        <Text style={styles.staleBanner} accessibilityLiveRegion="polite">
+          ⚠ NOT CURRENT — LAST FIX {seconds}s AGO
+        </Text>
+      ) : null}
 
       <View style={styles.rows}>
         {sigma != null && (
@@ -73,6 +95,28 @@ export default function PositionReadout({ fix }) {
 }
 
 const styles = StyleSheet.create({
+  coordStale: { color: t.color.textMuted },
+  staleBanner: {
+    fontFamily: t.font.mono, fontSize: t.type.meta, fontWeight: '700',
+    letterSpacing: 1.2, color: t.color.alertText,
+    backgroundColor: 'rgba(230,25,25,0.18)',
+    borderLeftWidth: 3, borderLeftColor: t.color.alertFill,
+    paddingHorizontal: t.space.sm, paddingVertical: t.space.xs,
+    marginTop: t.space.sm,
+  },
+
+  // HUD variant: the panel floats over the live map.
+  //
+  // OPAQUE, not translucent. Every ratio in tokens.js was measured against
+  // the solid #0F0F0F panel; any alpha composites that surface against
+  // whatever tile happens to be underneath, so the measured numbers stop
+  // being true and vary with the terrain. The map is muted at the source
+  // instead (see MapCanvas NIGHT/DAY_RASTER), which buys the same visual
+  // separation without putting the readout's legibility on a moving target.
+  hudSurface: {
+    backgroundColor: t.color.bgPanel,
+    borderBottomColor: t.color.border,
+  },
   wrap: {
     backgroundColor: t.color.bgPanel,
     borderBottomWidth: t.hairline,

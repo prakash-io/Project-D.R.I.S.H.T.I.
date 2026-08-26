@@ -40,16 +40,19 @@ const styles = StyleSheet.create({
   band: {
     flexDirection: 'row', alignItems: 'stretch',
     backgroundColor: t.color.bgRaised,
+    borderRadius: t.radius.card,
+    marginHorizontal: t.space.lg, marginBottom: t.space.md,
+    ...t.shadow.card,
     borderTopWidth: t.hairline, borderTopColor: t.color.alertFill,
   },
   stripe: { width: 4, backgroundColor: t.color.alertFill },
   body: { flex: 1, paddingHorizontal: t.space.lg, paddingVertical: t.space.md },
   title: {
-    fontFamily: t.font.mono, fontSize: t.type.micro, letterSpacing: 1.8,
+    fontFamily: t.font.sansMedium, fontSize: t.type.micro, letterSpacing: 1.8,
     color: t.color.alertText,
   },
   message: {
-    fontFamily: t.font.mono, fontSize: t.type.lead, color: t.color.textPrimary,
+    fontFamily: t.font.sansMedium, fontSize: t.type.lead, color: t.color.textPrimary,
     marginTop: t.space.xs,
   },
   dismiss: {
@@ -60,5 +63,5 @@ const styles = StyleSheet.create({
   // Opacity/colour only -- never a transform, which would shift the band's
   // layout under the driver's thumb.
   dismissPressed: { backgroundColor: t.color.bgInset },
-  dismissText: { fontFamily: t.font.mono, fontSize: t.type.lead, color: t.color.textMuted },
+  dismissText: { fontFamily: t.font.sansMedium, fontSize: t.type.lead, color: t.color.textMuted },
 });

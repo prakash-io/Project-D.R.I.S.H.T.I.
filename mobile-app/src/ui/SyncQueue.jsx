@@ -7,12 +7,14 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { t } from './tokens';
 
-export default function SyncQueue({ queued, mode }) {
+export default function SyncQueue({ queued, linkUp, hud }) {
   const holding = queued > 0;
-  const draining = holding && mode === 'online';
+  // Draining requires a live link, not merely internet: the drain POSTs to
+  // the same server the socket talks to.
+  const draining = holding && linkUp;
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, hud && styles.hudSurface]}>
       <View style={styles.left}>
         <Text style={styles.caption}>QUEUED ON DEVICE</Text>
         <Text style={styles.note}>
@@ -34,6 +36,19 @@ export default function SyncQueue({ queued, mode }) {
 }
 
 const styles = StyleSheet.create({
+
+  // HUD variant: the panel floats over the live map.
+  //
+  // OPAQUE, not translucent. Every ratio in tokens.js was measured against
+  // the solid #0F0F0F panel; any alpha composites that surface against
+  // whatever tile happens to be underneath, so the measured numbers stop
+  // being true and vary with the terrain. The map is muted at the source
+  // instead (see MapCanvas NIGHT/DAY_RASTER), which buys the same visual
+  // separation without putting the readout's legibility on a moving target.
+  hudSurface: {
+    backgroundColor: t.color.bgPanel,
+    borderBottomColor: t.color.border,
+  },
   wrap: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: t.color.bgPanel,

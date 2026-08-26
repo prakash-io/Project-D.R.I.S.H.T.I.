@@ -21,14 +21,14 @@ function SourceChip({ source }) {
   );
 }
 
-export default function SpeedCluster({ fix }) {
+export default function SpeedCluster({ fix, hud }) {
   // speed_mps from the edge engine, speed from react-native-geolocation.
   const mps = fix ? (fix.speed_mps ?? fix.speedMps ?? fix.speed ?? 0) : null;
   const kmh = mps == null ? null : mps * 3.6;
   const heading = fix ? (fix.heading_deg ?? fix.headingDeg ?? fix.heading ?? null) : null;
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, hud && styles.hudSurface]}>
       <View style={styles.headRow}>
         <Text style={styles.caption}>GROUND SPEED</Text>
         {fix ? <SourceChip source={fix.source} /> : null}
@@ -61,6 +61,19 @@ export default function SpeedCluster({ fix }) {
 }
 
 const styles = StyleSheet.create({
+
+  // HUD variant: the panel floats over the live map.
+  //
+  // OPAQUE, not translucent. Every ratio in tokens.js was measured against
+  // the solid #0F0F0F panel; any alpha composites that surface against
+  // whatever tile happens to be underneath, so the measured numbers stop
+  // being true and vary with the terrain. The map is muted at the source
+  // instead (see MapCanvas NIGHT/DAY_RASTER), which buys the same visual
+  // separation without putting the readout's legibility on a moving target.
+  hudSurface: {
+    backgroundColor: t.color.bgPanel,
+    borderBottomColor: t.color.border,
+  },
   wrap: {
     backgroundColor: t.color.bgPanel,
     borderBottomWidth: t.hairline,

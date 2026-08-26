@@ -8,12 +8,12 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { t, modePresentation } from './tokens';
 
-export default function StatusBanner({ mode, connected }) {
+export default function StatusBanner({ mode, connected, hud }) {
   const m = modePresentation(mode);
 
   return (
     <View
-      style={[styles.band, { borderLeftColor: m.tone }]}
+      style={[styles.band, { borderLeftColor: m.tone }, hud && styles.hudSurface]}
       accessibilityRole="header"
       // Announce the transition -- a driver whose eyes are on the road needs
       // to hear that the link dropped, not discover it later.
@@ -35,6 +35,19 @@ export default function StatusBanner({ mode, connected }) {
 }
 
 const styles = StyleSheet.create({
+
+  // HUD variant: the panel floats over the live map.
+  //
+  // OPAQUE, not translucent. Every ratio in tokens.js was measured against
+  // the solid #0F0F0F panel; any alpha composites that surface against
+  // whatever tile happens to be underneath, so the measured numbers stop
+  // being true and vary with the terrain. The map is muted at the source
+  // instead (see MapCanvas NIGHT/DAY_RASTER), which buys the same visual
+  // separation without putting the readout's legibility on a moving target.
+  hudSurface: {
+    backgroundColor: t.color.bgPanel,
+    borderBottomColor: t.color.border,
+  },
   band: {
     backgroundColor: t.color.bgPanel,
     borderLeftWidth: 4,
