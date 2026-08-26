@@ -2,11 +2,16 @@
 import { Database } from '@nozbe/watermelondb';
 import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite';
 import { schema } from './schema';
+import { migrations } from './migrations';
 import TelemetryPoint from './models/TelemetryPoint';
+import HazardReport from './models/HazardReport';
+import HazardForecast from './models/HazardForecast';
 
 export function createDatabase() {
   const adapter = new SQLiteAdapter({
     schema,
+    // Without this, a version bump silently wipes the queue.
+    migrations,
     // JSI where available: the offline queue is written at 10 Hz through a
     // whole blackout, and the async bridge adds latency to every one of those
     // writes on the same thread that is reading the sensors.
@@ -20,5 +25,5 @@ export function createDatabase() {
     },
   });
 
-  return new Database({ adapter, modelClasses: [TelemetryPoint] });
+  return new Database({ adapter, modelClasses: [TelemetryPoint, HazardReport, HazardForecast] });
 }

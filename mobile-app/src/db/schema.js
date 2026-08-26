@@ -8,7 +8,7 @@
 import { appSchema, tableSchema } from '@nozbe/watermelondb';
 
 export const schema = appSchema({
-  version: 1,
+  version: 3,
   tables: [
     tableSchema({
       name: 'telemetry_points',
@@ -30,6 +30,46 @@ export const schema = appSchema({
         // when the row reaches the server -- burst-synced points arrive
         // minutes to hours late, so ordering a track by arrival scrambles it.
         { name: 'captured_at', type: 'number', isIndexed: true },
+      ],
+    }),
+
+    // Crowdsourced hazard reports (Workflow 4). Same offline-first contract as
+    // telemetry: the row is written before the network is attempted, and it is
+    // deleted only once the backend has acknowledged it.
+    tableSchema({
+      name: 'hazard_reports',
+      columns: [
+        // Sent as client_uid on the multipart upload. The backend's UNIQUE
+        // index on it is what makes replaying a queued report safe -- without
+        // it, a lost response during a burst sync creates a second incident
+        // and can block a road twice.
+        { name: 'client_uid', type: 'string', isIndexed: true },
+        { name: 'latitude', type: 'number' },
+        { name: 'longitude', type: 'number' },
+        // Path under DocumentDirectoryPath, never a blob.
+        { name: 'photo_path', type: 'string' },
+        { name: 'mime_type', type: 'string' },
+        { name: 'kind', type: 'string' },
+        { name: 'captured_at', type: 'number', isIndexed: true },
+        { name: 'attempts', type: 'number' },
+        { name: 'last_error', type: 'string', isOptional: true },
+      ],
+    }),
+
+    // Predicted weather/terrain hazards along the active route (section 5).
+    // Cached so the warnings survive the dark zone that made them matter.
+    tableSchema({
+      name: 'hazard_forecasts',
+      columns: [
+        { name: 'node_key', type: 'string', isIndexed: true },
+        { name: 'latitude', type: 'number' },
+        { name: 'longitude', type: 'number' },
+        { name: 'kind', type: 'string' },
+        { name: 'probability', type: 'number' },
+        { name: 'rainfall_24h_mm', type: 'number', isOptional: true },
+        { name: 'rainfall_intensity_mmh', type: 'number', isOptional: true },
+        { name: 'window_start_utc', type: 'string', isOptional: true },
+        { name: 'fetched_at', type: 'number', isIndexed: true },
       ],
     }),
   ],
