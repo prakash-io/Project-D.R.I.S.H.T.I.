@@ -20,6 +20,10 @@ export const config = {
     ?? 'postgresql://drishti:drishti@localhost:5433/drishti',
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6380',
 
+  // '*' in development. A dispatcher console on another origin has to be able
+  // to reach this, and the API carries no cookies or credentials.
+  corsOrigin: process.env.CORS_ORIGIN ?? '*',
+
   syncQueueName: process.env.SYNC_QUEUE_NAME ?? 'burst-sync',
   syncQueueConcurrency: int(process.env.SYNC_QUEUE_CONCURRENCY, 4),
 
@@ -30,6 +34,12 @@ export const config = {
   // treats a negative cost as impassable and drops the edge from the graph
   // entirely, which loses the ability to route through it as a last resort.
   blockedEdgeCost: int(process.env.BLOCKED_EDGE_COST, 999999),
+
+  // Where driver photos are kept. WEB-05 shows the dispatcher the photo next
+  // to the model's verdict, and a reviewer cannot approve closing a highway
+  // on the strength of a class name alone -- so the image has to survive the
+  // request that carried it.
+  uploadDir: process.env.UPLOAD_DIR ?? path.join(ROOT, 'data', 'incidents'),
 
   // How far from a road a report may be before it is rejected. Beyond this
   // it is bad GPS, and blocking the "nearest" edge would take out an

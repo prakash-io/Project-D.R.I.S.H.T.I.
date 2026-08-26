@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    @apply bg-panel text-slate-200 antialiased;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+}
+
+/* maplibre ships a light-themed control set; these are the only rules needed
+   to stop the attribution and zoom buttons glowing white on a dark map. */
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-group {
+  @apply !bg-surface !text-muted;
+}
+.maplibregl-ctrl-attrib a { @apply !text-muted; }

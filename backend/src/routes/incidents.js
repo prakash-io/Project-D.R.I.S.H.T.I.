@@ -1,15 +1,42 @@
 // Crowdsourced incident reporting and dispatcher approval (API-03, workflow §4).
 import { Router } from 'express';
 import multer from 'multer';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createReadStream } from 'node:fs';
 import { query, withTransaction } from '../db.js';
 import { config } from '../config.js';
 import { verifyIncident, AiServiceError } from '../services/aiClient.js';
 import { snapToEdge, tripsUsingEdge, routeBetween } from '../services/routing.js';
 import { broadcast, emitTo, INCIDENT_EVENT, ROUTE_EVENT } from '../sockets/telemetry.js';
+import { randomUUID } from 'node:crypto';
 
-// In memory: the photo is forwarded to the AI service and never stored by
-// this process. 8 MB covers a phone camera JPEG with room to spare.
+// In memory first: the buffer is forwarded to the AI service, then written to
+// disk so WEB-05 can show it. 8 MB covers a phone camera JPEG with room to
+// spare.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+/**
+ * Persist the driver's photo.
+ *
+ * A dispatcher is being asked to close a highway. Showing them only a class
+ * name and a confidence would make the review a rubber stamp -- the photo IS
+ * the evidence, and it is the whole reason the approval step exists.
+ *
+ * Stored under the incident's own uuid rather than the uploaded filename:
+ * a client-supplied name is attacker-controlled and path traversal here would
+ * write anywhere the process can reach.
+ */
+async function storePhoto(buffer, mimetype) {
+  const extension = mimetype === 'image/png' ? 'png'
+    : mimetype === 'image/webp' ? 'webp' : 'jpg';
+  await fs.mkdir(config.uploadDir, { recursive: true });
+  const name = `${randomUUID()}.${extension}`;
+  await fs.writeFile(path.join(config.uploadDir, name), buffer);
+  return name;
+}
 
 export const incidentsRouter = Router();
 
@@ -31,6 +58,12 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
       return res.status(400).json({ error: 'lat and lng are required numbers' });
     }
     if (!req.file) return res.status(400).json({ error: 'a photo file is required' });
+    if (!ALLOWED_IMAGE_TYPES.has(req.file.mimetype)) {
+      return res.status(415).json({
+        error: `unsupported photo type ${req.file.mimetype}`,
+        accepted: [...ALLOWED_IMAGE_TYPES],
+      });
+    }
 
     // Snap first: a report nowhere near a road is bad GPS, and there is no
     // point spending a model inference on it.
@@ -40,6 +73,15 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
         error: `no road within ${config.incidentSnapMaxM} m of (${lat}, ${lng})`,
         hint: 'the report is probably a bad GPS fix; it was not recorded',
       });
+    }
+
+    // Stored before classification, so a report survives the AI service being
+    // down -- the dispatcher can still look at the photo and decide.
+    let photoPath = null;
+    try {
+      photoPath = await storePhoto(req.file.buffer, req.file.mimetype);
+    } catch (error) {
+      console.error('[incidents] could not store photo:', error.message);
     }
 
     let verdict;
@@ -52,7 +94,7 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
         const pending = await insertIncident({
           lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
           kind: 'obstruction', status: 'pending', confidence: null,
-          aiClass: null, aiReviewed: false,
+          aiClass: null, aiReviewed: false, photoPath,
         });
         return res.status(202).json({
           incident: pending,
@@ -81,7 +123,7 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
       lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
       kind: verdict.incident_kind ?? 'obstruction',
       status, confidence: verdict.confidence ?? null,
-      aiClass: verdict.predicted_class ?? null, aiReviewed: true,
+      aiClass: verdict.predicted_class ?? null, aiReviewed: true, photoPath,
     });
 
     broadcast(INCIDENT_EVENT, { ...incident, ai: verdict, snapped_to_edge: snap.edgeId });
@@ -108,6 +150,7 @@ incidentsRouter.get('/', async (req, res, next) => {
     const status = req.query.status ?? null;
     const { rows } = await query(
       `SELECT id, kind, status, confidence, ai_class, blocked_edge,
+              photo_path IS NOT NULL AS has_photo,
               ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at, verified_at,
               approved_by, approved_at
        FROM incidents
@@ -117,6 +160,32 @@ incidentsRouter.get('/', async (req, res, next) => {
     );
     res.json({ incidents: rows });
   } catch (error) { next(error); }
+});
+
+/**
+ * GET /incidents/:id/photo -- the evidence WEB-05 shows the dispatcher.
+ *
+ * Streamed from disk by the incident's uuid. The stored filename is generated
+ * server-side, never taken from the upload, so there is no path the client
+ * can influence.
+ */
+incidentsRouter.get('/:id/photo', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT photo_path FROM incidents WHERE id = $1`,
+      [req.params.id]);
+    if (rows.length === 0 || !rows[0].photo_path) {
+      return res.status(404).json({ error: 'no photo for that incident' });
+    }
+    const stored = path.basename(rows[0].photo_path);
+    const full = path.join(config.uploadDir, stored);
+    res.type(path.extname(stored) || '.jpg');
+    // Immutable: an incident photo never changes, so a dispatcher scrolling
+    // the queue should not re-fetch it.
+    res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+    return createReadStream(full)
+      .on('error', () => res.status(404).json({ error: 'photo file is missing on disk' }))
+      .pipe(res);
+  } catch (error) { return next(error); }
 });
 
 /**
@@ -179,15 +248,16 @@ incidentsRouter.post('/:id/clear', async (req, res, next) => {
 });
 
 async function insertIncident({ lat, lng, truckId, edgeId, kind, status, confidence,
-                                aiClass, aiReviewed }) {
+                                aiClass, aiReviewed, photoPath }) {
   const { rows } = await query(
     `INSERT INTO incidents (reported_by, geom, kind, status, confidence,
-                            blocked_edge, ai_class, ai_reviewed, verified_at)
-     VALUES ($1, ST_SetSRID(ST_MakePoint($3, $2), 4326), $4, $5, $6, $7, $8, $9,
+                            blocked_edge, ai_class, ai_reviewed, photo_path, verified_at)
+     VALUES ($1, ST_SetSRID(ST_MakePoint($3, $2), 4326), $4, $5, $6, $7, $8, $9, $10,
              CASE WHEN $5 = 'verified' THEN now() END)
-     RETURNING id, kind, status, confidence, ai_class, blocked_edge,
+     RETURNING id, kind, status, confidence, ai_class, blocked_edge, photo_path,
                ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at`,
-    [truckId, lat, lng, kind, status, confidence, edgeId, aiClass, aiReviewed],
+    [truckId, lat, lng, kind, status, confidence, edgeId, aiClass, aiReviewed,
+     photoPath ?? null],
   );
   return rows[0];
 }

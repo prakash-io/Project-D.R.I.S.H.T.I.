@@ -17,10 +17,19 @@ import { attachTelemetry } from './sockets/telemetry.js';
 import { incidentsRouter } from './routes/incidents.js';
 import { syncRouter } from './routes/sync.js';
 import { routingRouter } from './routes/routing.js';
+import { riskRouter } from './routes/risk.js';
 import { closeQueue } from './queues/burstSync.js';
 
 export function createApp() {
   const app = express();
+  // The dashboard is served by Vite on another origin in development.
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', config.corsOrigin);
+    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    return next();
+  });
   // Burst-sync batches are large; the default 100 kb limit rejects a real
   // backlog. 50,000 points is the endpoint's own cap, checked in sync.js.
   app.use(express.json({ limit: '32mb' }));
@@ -46,6 +55,7 @@ export function createApp() {
   });
 
   app.use('/incidents', incidentsRouter);
+  app.use('/risk', riskRouter);
   app.use('/sync', syncRouter);
   app.use('/', routingRouter);
 

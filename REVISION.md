@@ -29,7 +29,11 @@ reverse-engineer. Newest revision first.
 | 2 | ML-04 XGBoost hazard model | ✅ retrained on raster-rebuilt features, 0.9942 test acc, physically coherent — see R9 |
 | 2 | ML-05 YOLOv8 incident verifier | ⚠️ retrained 2-class, 1.000 top-1 — but trained on satellite/aerial, served ground-level photos, see R8 |
 | 2 | ML-06 `/predict-hazard`, `/verify-incident` | ✅ both verified end-to-end, 57 tests |
-| 3 | WEB-01…05 React + Deck.gl dashboard | ⬜ not started |
+| 3 | WEB-01 React + Tailwind dark shell | ✅ Vite, verified in headless Chrome |
+| 3 | WEB-02 Deck.gl over MapLibre/OSM | ✅ CARTO dark basemap, no API key |
+| 3 | WEB-03 live truck markers | ✅ interpolated at 60 fps from a 1 Hz stream |
+| 3 | WEB-04 Disruption Overlay | ✅ 160 segments > 85% as red corridors |
+| 3 | WEB-05 Incident review panel | ✅ photo + verdict + Approve Reroute, 20/20 checks |
 | 4 | MOB-04 C++ EKF (Eigen) | ✅ 79 checks; map matching cuts a 60 s blackout from 261,693 → 14.4 m² |
 | 4 | MOB-05 TFLite velocity model | ⚠️ trained (R6); used as a weak measurement per Q3, R = RMSE² |
 | 4 | MOB-06 TFLite→EKF bridge + map matching | ✅ verified against the real R*Tree extract |
@@ -128,6 +132,105 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R12 — 2026-08-26 · Chunk 4: the dispatcher command center (Epic 3)
+
+**Created**: `dashboard/**` (Vite + React + Tailwind + deck.gl/MapLibre),
+`backend/src/routes/risk.js`, `backend/test/mock_stream.mjs`,
+`dashboard/verify.mjs`
+
+**Modified**: `backend/src/routes/incidents.js`, `backend/src/server.js`,
+`backend/src/config.js`, `.env.example`
+
+**Stack added**: Vite 5.4, React 18.3, Tailwind 3.4, deck.gl 9.0,
+maplibre-gl 4.7, react-map-gl 7.1.
+
+**Verification**: **20/20 checks pass** against a real headless Chrome.
+
+### Two backend gaps the dashboard exposed
+
+WEB-05 asks the panel to show the driver's photo. It could not: `/incidents/report`
+forwarded the buffer to the AI service and never stored it, leaving
+`incidents.photo_path` unused since 001. A dispatcher being asked to close a
+highway on a class name and a confidence, with no image, is a rubber stamp
+rather than a review — the photo *is* the evidence the approval step exists
+for. Photos are now written to disk **before** classification, so a report
+survives the AI service being down, and served by `GET /incidents/:id/photo`
+under a server-generated uuid (a client-supplied filename is
+attacker-controlled, and path traversal there writes anywhere the process can
+reach).
+
+WEB-04 needs risk scores, and `road_edges.risk_score` had never been written
+to by anything. `POST /risk/refresh` scores segment **midpoints** through the
+model — one sample per edge, which is already the resolution the features
+carry, since elevation and distance-to-river vary over hundreds of metres and
+the median edge is 333 m. Scoring is bounded by bbox and highway class rather
+than sweeping all 486,784 edges: a dispatcher looks at a corridor, and 486k
+model calls would take hours to produce a number stale on arrival. 220 trunk
+and primary segments around Guwahati scored in one pass; 160 came back above
+the 0.85 threshold.
+
+### Interpolation is a lag, not a prediction
+
+Telemetry arrives at 1 Hz. Drawing it as it lands makes every truck jump once
+a second, which reads as a broken feed. Each truck therefore holds a `from`
+and a `to` and the map draws the smoothstepped interpolation between them on
+an animation frame.
+
+Deliberately a **lag**: the marker moves from where the truck was to where it
+now is, arriving as the next packet lands. Extrapolating ahead of the last fix
+would draw a truck somewhere no telemetry ever placed it — on a dispatcher's
+screen that is a lie, and during a dark-zone gap it would be a confident one.
+
+The interpolation store is a `useRef` map, not state: it is written every
+animation frame, and holding it in state would re-render the tree 60 times a
+second.
+
+### The map says which positions are estimates
+
+A dead-reckoned truck draws in amber with an uncertainty halo sized from
+`sqrt(covariance_m2)`; a GNSS fix draws in blue with none. That distinction is
+the entire product, and the covariance column exists in the schema precisely
+so the dashboard can draw it.
+
+### Verified in a real browser, not asserted
+
+`dashboard/verify.mjs` drives headless Chrome over the DevTools Protocol —
+CDP directly rather than Puppeteer, since this needs one tab and six commands
+and a ~300 MB dependency is a poor trade. It loads the app, waits for live
+telemetry, toggles the overlay, clicks Approve Reroute, and captures console
+errors plus every HTTP response.
+
+    4.1  WebGL 2.0 context, 2 canvases mounted, 6 CARTO basemap responses
+         (no API key, no Mapbox token)
+    4.2  8 -> 16 packets while watching; 2 truck markers rendered
+    4.3  GET /risk/segments 200, 160 segments above 85% drawn as red corridors
+         POST /incidents/:id/approve 200 in ~4.5 s, after a 204 preflight
+         "Edge 150647 blocked - 2 truck(s) rerouted" shown to the dispatcher
+         review queue 1 -> 0, incident photo served 200
+         no console errors
+
+    20 checks, 0 failures
+
+Headless Chrome needs `--use-angle=swiftshader`: with no GPU every WebGL
+context creation fails, which looks exactly like a broken map rather than a
+missing rasteriser.
+
+Two of my own verification bugs, both of which reported working code as broken:
+
+* Asserting on the **first** matching `/approve` request tested the CORS
+  preflight (`OPTIONS` → 204) rather than the POST.
+* A fixed 5 s sleep after the click. Approving blocks the edge *and* reroutes
+  every affected trip, which took ~4.5 s with two active trips — right on the
+  boundary, so the check flaked. It now polls for the 200 and reports the
+  measured latency instead of guessing it.
+
+The first screenshot also showed `0 packets`, which was the capture firing at
+the load event before any telemetry arrived — not a bug, but only
+distinguishable from one by checking the backend was broadcasting, which it
+was (10 packets in 5 s to an independent listener).
 
 ---
 
