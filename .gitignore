@@ -95,3 +95,9 @@ mobile-app/native/test/test_bridge
 mobile-app/native/test/test_bridge
 mobile-app/native/test/test_dead_reckoning
 *.o
+
+# Compiled mission harness for the edge engine. Rebuilt on demand by
+# backend/simulate_dark_zone_mission.mjs, which compiles it against
+# mobile-app/native/ if it is absent. The .cpp beside it IS tracked; the
+# architecture-specific binary is not.
+backend/test/edge/dark_zone_drive
