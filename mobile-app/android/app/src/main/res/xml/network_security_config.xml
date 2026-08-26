@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is denied by default (targetSdk 34), which is why the release
+  build could not reach dispatch even once the URL was right. The debug
+  variant opts in via src/debug/AndroidManifest.xml, so this only ever bit
+  the release build.
+
+  Production dispatch MUST be HTTPS. Rather than re-enable cleartext for the
+  whole app, this permits it for the bring-up server on the lab LAN alone;
+  every other destination still requires TLS.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- Hardware bring-up host. Remove once dispatch is served over TLS. -->
+        <domain includeSubdomains="false">172.60.2.75</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

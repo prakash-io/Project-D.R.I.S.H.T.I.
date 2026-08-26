@@ -2,6 +2,10 @@ apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
+// Copies the MaterialIcons TTF into the APK so <Icon> renders glyphs
+// instead of tofu boxes. Autolinking wires the native module but not the font.
+apply from: file("../../node_modules/react-native-vector-icons/fonts.gradle")
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
@@ -78,6 +82,22 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.drishti"
+
+    // DrishtiEdge_Create() opens the graph with sqlite3_open_v2, which cannot
+    // read a compressed APK entry. It is extracted to DocumentDirectoryPath on
+    // first launch regardless, so storing these uncompressed makes that a
+    // straight byte copy instead of an inflate of 104 MB.
+    androidResources {
+        noCompress += ["sqlite", "tflite"]
+    }
+
+    sourceSets {
+        main {
+            // Staged from data/artifacts/edge at build time rather than copied
+            // into the repo: the graph is 104 MB and data/** is gitignored.
+            assets.srcDirs += "${layout.buildDirectory.get().asFile}/edgeAssets"
+        }
+    }
     defaultConfig {
         applicationId "com.drishti"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -135,3 +155,26 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+// --- Edge engine assets (MOB-04 / MOB-06) --------------------------------
+// The road graph and the speed model ship inside the APK so the dark zone has
+// them when there is no network to fetch them with.
+def edgeArtifacts = file("${rootProject.projectDir}/../../data/artifacts/edge")
+
+tasks.register('stageEdgeAssets', Copy) {
+    doFirst {
+        ['road_graph.sqlite', 'speed_model.tflite'].each { name ->
+            if (!new File(edgeArtifacts, name).exists()) {
+                throw new GradleException(
+                    "Edge asset ${name} not found in ${edgeArtifacts}. " +
+                    "The dark-zone engine cannot run without it.")
+            }
+        }
+    }
+    from(edgeArtifacts) {
+        include 'road_graph.sqlite', 'speed_model.tflite'
+    }
+    into layout.buildDirectory.dir('edgeAssets')
+}
+
+tasks.named('preBuild') { dependsOn 'stageEdgeAssets' }
