@@ -10,6 +10,7 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.load
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.drishti.edge.DrishtiEdgePackage
+import com.drishti.tracking.TrackingServicePackage
 import com.facebook.react.soloader.OpenSourceMergedSoMapping
 import com.facebook.soloader.SoLoader
 
@@ -22,6 +23,9 @@ class MainApplication : Application(), ReactApplication {
               // The edge engine is in-app, not a node_modules package, so
               // PackageList does not autolink it (MOB-04).
               add(DrishtiEdgePackage())
+              // Foreground service that keeps tracking alive with the screen
+              // off (MOB-01). Also in-app, also not autolinked.
+              add(TrackingServicePackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

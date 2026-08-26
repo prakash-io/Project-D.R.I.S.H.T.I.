@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Incident photos (Workflow 4). -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- API 33+. The tracking notification is the user's only visible signal
+         that location is being recorded, so it is requested at runtime before
+         a trip starts rather than left to fail silently. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.location.gps" android:required="true" />
     <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="true" />
@@ -38,5 +42,16 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+
+      <!-- MOB-01: keeps position logging running when the app is backgrounded.
+           foregroundServiceType MUST be declared and MUST match the type
+           passed to startForeground(); from API 34 a mismatch is a hard crash,
+           not a warning. Not exported: nothing outside the app may start it. -->
+      <service
+        android:name="com.drishti.tracking.TrackingService"
+        android:enabled="true"
+        android:exported="false"
+        android:stopWithTask="true"
+        android:foregroundServiceType="location" />
     </application>
 </manifest>

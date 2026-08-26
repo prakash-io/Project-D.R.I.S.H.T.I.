@@ -27,6 +27,7 @@ import { createDatabase } from './src/db';
 import { connect } from './src/services/socket';
 import { watchConnectivity } from './src/services/network';
 import { Tracker } from './src/services/tracking';
+import { requestTrackingPermissions } from './src/services/permissions';
 import { drain, pendingCount } from './src/services/burstSync';
 import { queueHazard, drainHazards, pendingHazardCount } from './src/services/hazardSync';
 import { ensureEdgeAssets } from './src/services/edgeAssets';
@@ -188,6 +189,21 @@ export default function App() {
         console.error('[edge] asset extraction failed -- dead reckoning is ' +
           'UNAVAILABLE for this session:', error.message);
         log('ERR', 'ASSETS_FAIL', `Dead reckoning unavailable: ${error.message}`);
+      }
+      if (disposed) return;
+
+      // Ask BEFORE the first watchPosition. Nothing requested these before, so
+      // a clean install failed with PERMISSION_DENIED and looked like a GNSS
+      // fault; the foreground service additionally refuses to start without
+      // location, because Android 14 kills a location-typed service that has
+      // no location permission.
+      const granted = await requestTrackingPermissions();
+      if (!granted.location) {
+        log('ERR', 'NO_LOCATION_PERM',
+          'Location denied — tracking cannot run. Grant it in Settings.');
+      } else if (!granted.notifications) {
+        log('WARN', 'NO_NOTIF_PERM',
+          'Notifications denied — tracking still runs, but the trip notification is hidden.');
       }
       if (disposed) return;
 

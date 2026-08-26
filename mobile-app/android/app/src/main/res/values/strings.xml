@@ -1,3 +1,12 @@
 <resources>
     <string name="app_name">Drishti</string>
+
+    <!-- Foreground service notification (MOB-01). Android requires a visible,
+         user-dismissible-only notification for the whole time location is
+         collected in the background; these are the words the driver sees on
+         the lock screen for the length of a haul. -->
+    <string name="tracking_channel_name">Trip tracking</string>
+    <string name="tracking_channel_description">Shown while Drishti is recording a trip. Keeps position logging running when the screen is off.</string>
+    <string name="tracking_notification_title">Drishti is tracking this trip</string>
+    <string name="tracking_notification_idle">Recording position</string>
 </resources>

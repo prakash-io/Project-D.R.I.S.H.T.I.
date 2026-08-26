@@ -6,6 +6,7 @@ import Geolocation from 'react-native-geolocation-service';
 import { accelerometer, gyroscope, setUpdateIntervalForType, SensorTypes }
   from 'react-native-sensors';
 import * as edge from './edgeEngine';
+import * as foreground from './foregroundService';
 
 const IMU_HZ = 100;
 const MAP_MATCH_EVERY_N_FIXES = 50;   // 5 s at the model's 10 Hz output
@@ -32,6 +33,13 @@ export class Tracker {
     if (this.mode === 'online') return;
     this.stopOffline();
     this.mode = 'online';
+
+    // Fire and forget, and deliberately NOT awaited: the first GNSS fix must
+    // not wait on a notification being drawn. `start` also repaints when the
+    // service is already up, so arriving here from the dark zone reuses the
+    // running service rather than cycling it -- see stopOnline/stopOffline,
+    // neither of which tears it down.
+    foreground.start('GNSS · streaming to command center');
 
     this.watchId = Geolocation.watchPosition(
       (position) => {
@@ -95,6 +103,11 @@ export class Tracker {
     }
     this.stopOnline();
     this.mode = 'offline';
+
+    // The one transition that most needs the service: no network, screen
+    // probably off, 100 Hz IMU into the EKF. The wake lock the service holds
+    // is what keeps that sampling regular.
+    foreground.start('DARK ZONE · dead reckoning');
 
     const started = await edge.start({
       graphPath: this.graphPath,
@@ -188,6 +201,10 @@ export class Tracker {
   async stop() {
     this.stopOnline();
     await this.stopOffline();
+    // Only here. stopOnline() and stopOffline() are also the mode-switch
+    // path, and dropping the service on a switch would hand the OS a window
+    // to freeze the process precisely as the truck enters a dark zone.
+    await foreground.stop();
     this.mode = 'idle';
   }
 }
