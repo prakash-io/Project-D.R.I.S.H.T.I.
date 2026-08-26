@@ -9,12 +9,20 @@
 //
 // CDP directly instead of Puppeteer: this needs one tab and six commands, and
 // a ~300 MB dependency to get them is a poor trade for a verification script.
+//
+// It cleans up after itself. Approving an incident sets its status to
+// 'verified', and routable_edges keys its 999999 blocked cost off exactly
+// that -- so a run that approved and walked away left a road closed for every
+// later test. Two runs of this script silently inflated a 95 km reference
+// route to 149 km that way. The cleanup phase below clears what it approved,
+// sweeps anything else still blocking, and asserts the graph is back to zero.
 import WebSocket from 'ws';
 import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const URL_ = process.env.DASH_URL ?? 'http://127.0.0.1:5173/';
+const BACKEND = process.env.API_URL ?? 'http://localhost:4000';
 const OUT = process.env.OUT_DIR ?? '.';
 const PORT = 9333;
 
@@ -23,6 +31,42 @@ let checks = 0;
 let failures = 0;
 const ok = (label, extra = '') => { checks += 1; console.log(`  ok   ${label}${extra ? `  ${extra}` : ''}`); };
 const fail = (label, why) => { checks += 1; failures += 1; console.log(`  FAIL ${label}  ${why}`); };
+
+/**
+ * Put the routing graph back the way we found it.
+ *
+ * Only `verified` incidents block an edge, so clearing them restores the
+ * original cost exactly -- road_edges.cost is never written, the 999999 lives
+ * in the routable_edges view. Clears this run's approvals first, then sweeps
+ * any other blocking incident, because leaving one behind is what poisons the
+ * next regression run.
+ */
+async function restoreGraph(approvedIds) {
+  const clear = async (id) => {
+    try {
+      const r = await fetch(`${BACKEND}/incidents/${id}/clear`, { method: 'POST' });
+      return r.ok;
+    } catch { return false; }
+  };
+  const blocking = async () => {
+    try {
+      const r = await fetch(`${BACKEND}/incidents?status=verified`);
+      const { incidents = [] } = await r.json();
+      return incidents.filter((i) => i.blocked_edge != null);
+    } catch { return null; }
+  };
+
+  let own = 0;
+  for (const id of approvedIds) if (await clear(id)) own += 1;
+
+  const stale = await blocking();
+  if (stale === null) return { own, swept: 0, remaining: null };
+  let swept = 0;
+  for (const i of stale) if (await clear(i.id)) swept += 1;
+
+  const left = await blocking();
+  return { own, swept, remaining: left === null ? null : left.length };
+}
 
 class Cdp {
   constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); this.handlers = []; }
@@ -245,6 +289,27 @@ async function main() {
   const real = consoleErrors.filter((e) => !/favicon|DevTools/i.test(e));
   real.length === 0 ? ok('no console errors')
                     : fail('console errors', `${real.length}: ${real.slice(0, 3).join(' | ')}`);
+
+  // -------------------------------------------------------------- cleanup
+  console.log('\ncleanup');
+  const approvedIds = approveCalls
+    .filter((r) => r.status === 200)
+    .map((r) => r.url.match(/\/incidents\/([^/]+)\/approve/)?.[1])
+    .filter(Boolean);
+  const restored = await restoreGraph(approvedIds);
+
+  restored.own === approvedIds.length
+    ? ok('approved incident cleared', `${restored.own}/${approvedIds.length}`)
+    : fail('clear approved', `${restored.own}/${approvedIds.length} cleared`);
+
+  if (restored.swept > 0) {
+    console.log(`       swept ${restored.swept} pre-existing blocking incident(s)`);
+  }
+  restored.remaining === 0
+    ? ok('graph restored', '0 active blocked edges')
+    : fail('graph restored',
+           restored.remaining === null ? 'backend unreachable'
+                                       : `${restored.remaining} edge(s) still blocked`);
 
   cdp.close();
   chrome.kill('SIGKILL');
