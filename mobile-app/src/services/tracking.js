@@ -11,12 +11,13 @@ const IMU_HZ = 100;
 const MAP_MATCH_EVERY_N_FIXES = 50;   // 5 s at the model's 10 Hz output
 
 export class Tracker {
-  constructor({ database, socket, graphPath, modelPath, onFix }) {
+  constructor({ database, socket, graphPath, modelPath, onFix, onQueued }) {
     this.database = database;
     this.socket = socket;
     this.graphPath = graphPath;
     this.modelPath = modelPath;
     this.onFix = onFix;
+    this.onQueued = onQueued;
 
     this.mode = 'idle';
     this.lastFix = null;
@@ -34,22 +35,36 @@ export class Tracker {
 
     this.watchId = Geolocation.watchPosition(
       (position) => {
-        const { latitude, longitude, speed, heading } = position.coords;
+        const { latitude, longitude, speed, heading, altitude } = position.coords;
         this.lastFix = {
           latitude, longitude,
           speed: speed ?? 0,
           heading: heading ?? 0,
+          // Read but not synced: the backend's telemetry payload has no
+          // altitude column, so this is a display value only. NER routes climb
+          // and drop hard enough that a driver reads it as terrain context.
+          altitude: Number.isFinite(altitude) ? altitude : null,
           timestamp: position.timestamp,
         };
         this.fixCount += 1;
-        this.socket?.emit('truck_location_update', {
-          truck_id: this.truckId,
-          lat: latitude,
-          lng: longitude,
-          speed: speed ?? null,
-          source: 'gps',
-          timestamp: new Date(position.timestamp).toISOString(),
-        });
+        // Only a live socket carries the fix away. socket.io buffers emits
+        // while disconnected and drops the buffer on reconnect, so emitting
+        // into a dead socket looked like streaming while silently discarding
+        // every point. Anything the link cannot take RIGHT NOW is queued
+        // instead -- same durability guarantee the dark zone already had.
+        if (this.socket?.connected) {
+          this.socket.emit('truck_location_update', {
+            truck_id: this.truckId,
+            lat: latitude,
+            lng: longitude,
+            speed: speed ?? null,
+            source: 'gps',
+            timestamp: new Date(position.timestamp).toISOString(),
+          });
+        } else {
+          this.persist(this.lastFix, 'gps').catch((error) =>
+            console.warn('[queue]', error.message));
+        }
         this.onFix?.({ ...this.lastFix, source: 'gps' });
       },
       (error) => console.warn('[gnss]', error.message),
@@ -119,24 +134,38 @@ export class Tracker {
     return true;
   }
 
-  /** Every dead-reckoned fix becomes a queued row. */
-  async persist(fix) {
+  /**
+   * Any fix the link could not take becomes a queued row.
+   *
+   * Takes both shapes: the engine's snake_case dead-reckoned fix and the
+   * GNSS fix built above. `source` decides the covariance rule, so it is a
+   * parameter rather than a constant.
+   */
+  async persist(fix, source = 'ekf') {
     await this.database.write(async () => {
       await this.database.get('telemetry_points').create((row) => {
         row.clientUid = uuid();
         row.latitude = fix.latitude;
         row.longitude = fix.longitude;
-        row.speedMps = fix.speed_mps ?? fix.speedMps ?? null;
-        row.headingDeg = fix.heading_deg ?? fix.headingDeg ?? null;
-        row.source = 'ekf';
+        row.speedMps = fix.speed_mps ?? fix.speedMps ?? fix.speed ?? null;
+        row.headingDeg = fix.heading_deg ?? fix.headingDeg ?? fix.heading ?? null;
+        row.source = source;
         // Never null on an 'ekf' row: the server's CHECK constraint rejects
-        // it, and the whole batch would come back as rejected points.
-        row.covarianceM2 = fix.covariance_m2 ?? fix.covarianceM2 ?? 0;
+        // it, and the whole batch would come back as rejected points. A 'gps'
+        // row has no covariance to report and must leave it null.
+        row.covarianceM2 = source === 'ekf'
+          ? (fix.covariance_m2 ?? fix.covarianceM2 ?? 0)
+          : null;
         row.mapMatched = Boolean(fix.map_matched ?? fix.mapMatched);
         row.matchedEdgeId = fix.matched_edge_id ?? null;
-        row.capturedAt = Math.round((fix.timestamp_s ?? Date.now() / 1000) * 1000);
+        // The engine reports seconds; a GNSS position reports milliseconds.
+        row.capturedAt = fix.timestamp_s != null
+          ? Math.round(fix.timestamp_s * 1000)
+          : (fix.timestamp ?? Date.now());
       });
     });
+    // Let the UI count what is actually held, rather than assuming zero.
+    this.onQueued?.();
   }
 
   stopOnline() {

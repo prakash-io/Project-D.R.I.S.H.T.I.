@@ -52,6 +52,26 @@ export const incidentsRouter = Router();
  */
 incidentsRouter.post('/report', upload.single('file'), async (req, res, next) => {
   try {
+    // Idempotency key from the device's queue. The column is uuid, so a
+    // malformed value is rejected here rather than as a 500 from Postgres.
+    const rawUid = req.body?.client_uid;
+    const clientUid = typeof rawUid === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawUid)
+      ? rawUid : null;
+    if (rawUid != null && clientUid === null) {
+      return res.status(400).json({ error: 'client_uid must be a uuid' });
+    }
+
+    // A replay of a report already stored. Answer with the original and skip
+    // the snap and the model inference entirely: the device is retrying
+    // because it never saw our response, not because anything changed.
+    if (clientUid) {
+      const existing = await findByClientUid(clientUid);
+      if (existing) {
+        return res.status(200).json({ incident: existing, duplicate: true });
+      }
+    }
+
     const lat = Number.parseFloat(req.body?.lat);
     const lng = Number.parseFloat(req.body?.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -94,7 +114,7 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
         const pending = await insertIncident({
           lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
           kind: 'obstruction', status: 'pending', confidence: null,
-          aiClass: null, aiReviewed: false, photoPath,
+          aiClass: null, aiReviewed: false, photoPath, clientUid,
         });
         return res.status(202).json({
           incident: pending,
@@ -123,7 +143,7 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
       lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
       kind: verdict.incident_kind ?? 'obstruction',
       status, confidence: verdict.confidence ?? null,
-      aiClass: verdict.predicted_class ?? null, aiReviewed: true, photoPath,
+      aiClass: verdict.predicted_class ?? null, aiReviewed: true, photoPath, clientUid,
     });
 
     broadcast(INCIDENT_EVENT, { ...incident, ai: verdict, snapped_to_edge: snap.edgeId });
@@ -248,18 +268,33 @@ incidentsRouter.post('/:id/clear', async (req, res, next) => {
 });
 
 async function insertIncident({ lat, lng, truckId, edgeId, kind, status, confidence,
-                                aiClass, aiReviewed, photoPath }) {
+                                aiClass, aiReviewed, photoPath, clientUid }) {
   const { rows } = await query(
     `INSERT INTO incidents (reported_by, geom, kind, status, confidence,
-                            blocked_edge, ai_class, ai_reviewed, photo_path, verified_at)
+                            blocked_edge, ai_class, ai_reviewed, photo_path, verified_at,
+                            client_uid)
      VALUES ($1, ST_SetSRID(ST_MakePoint($3, $2), 4326), $4, $5, $6, $7, $8, $9, $10,
-             CASE WHEN $5 = 'verified' THEN now() END)
+             CASE WHEN $5 = 'verified' THEN now() END, $11)
+     ON CONFLICT (client_uid) WHERE client_uid IS NOT NULL DO NOTHING
      RETURNING id, kind, status, confidence, ai_class, blocked_edge, photo_path,
-               ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at`,
+               ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at, client_uid`,
     [truckId, lat, lng, kind, status, confidence, edgeId, aiClass, aiReviewed,
-     photoPath ?? null],
+     photoPath ?? null, clientUid ?? null],
   );
-  return rows[0];
+  // DO NOTHING returns no row: the device is replaying a report we already
+  // have. Hand back the original so the client can drop it from its queue.
+  return rows[0] ?? (clientUid ? await findByClientUid(clientUid) : null);
+}
+
+/// The already-stored incident for a replayed client_uid.
+async function findByClientUid(clientUid) {
+  const { rows } = await query(
+    `SELECT id, kind, status, confidence, ai_class, blocked_edge, photo_path,
+            ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at, client_uid
+       FROM incidents WHERE client_uid = $1`,
+    [clientUid],
+  );
+  return rows[0] ?? null;
 }
 
 /**
