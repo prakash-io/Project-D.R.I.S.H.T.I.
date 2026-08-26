@@ -92,6 +92,22 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 
+#: Per-source allowlists: only these filenames are taken from that directory.
+#:
+#: The flood drop is 760 images but only ~190 of them are ground level; the
+#: rest are aerial, TV screengrabs or stock-watermarked. Reviewed exhaustively
+#: as contact sheets, and the surviving filenames are listed in the curation
+#: file rather than derived by a rule, because no rule separates them -- the
+#: modality is a property of the photograph, not of its name or size.
+#: Keyed by directory NAME, not full path. The data payload is gitignored and
+#: lives in the shared checkout, so a source is routinely passed as an
+#: absolute path outside this tree (or this script runs from a worktree). A
+#: full-path key would simply fail to match, and the failure mode is silent:
+#: the allowlist would be skipped and all 760 images taken.
+ALLOWLIST: dict[str, Path] = {
+    "drive_drop": ROOT / "scripts/curation/flood_ground_level.txt",
+}
+
 #: Class name -> source directories. Names match the serving config's
 #: YOLO_CLASS_TO_INCIDENT_KIND, which already maps NORMAL_TERRAIN to None.
 SOURCES: dict[str, list[Path]] = {
@@ -218,22 +234,39 @@ def blocked_files(d: Path) -> set[str]:
     return out
 
 
-def collect(class_name: str, dirs: list[Path]) -> tuple[list[Path], int]:
+def allowed_files(d: Path) -> set[str] | None:
+    """Filenames this source is restricted to, or None if unrestricted."""
+    listing = ALLOWLIST.get(d.name)
+    if listing is None:
+        return None
+    if not listing.exists():
+        sys.exit(f"error: {d} is allowlisted but {listing} is missing")
+    return {ln.strip() for ln in listing.read_text().splitlines()
+            if ln.strip() and not ln.startswith("#")}
+
+
+def collect(class_name: str, dirs: list[Path]) -> tuple[list[Path], int, int]:
+    """(kept, rejected by allowlist, rejected by category)."""
     out: list[Path] = []
+    off_list = 0
     blocked = 0
     for d in dirs:
         if not d.exists():
             print(f"  ! {class_name}: {d} missing", file=sys.stderr)
             continue
         drop = blocked_files(d)
+        allow = allowed_files(d)
         for p in sorted(d.rglob("*")):
             if not p.is_file() or p.suffix.lower() not in IMG_EXT:
+                continue
+            if allow is not None and p.name not in allow:
+                off_list += 1
                 continue
             if p.name in drop:
                 blocked += 1
                 continue
             out.append(p)
-    return out, blocked
+    return out, off_list, blocked
 
 
 def main() -> int:
@@ -280,9 +313,11 @@ def main() -> int:
     print("== gathering")
     per_class: dict[str, list[Path]] = {}
     blocked_total = 0
+    off_list_total = 0
     for cls, dirs in sources.items():
-        found, blocked = collect(cls, dirs)
+        found, off_list, blocked = collect(cls, dirs)
         blocked_total += blocked
+        off_list_total += off_list
         if args.include_legacy:
             prefix = LEGACY.get(cls)
             if prefix:
@@ -290,8 +325,13 @@ def main() -> int:
                          if p.parent.parent.name != "images"
                          or p.stem.split("_")[0].lower() == prefix]
         per_class[cls] = found
+        notes = []
+        if off_list:
+            notes.append(f"-{off_list} not on the ground-level curation list")
+        if blocked:
+            notes.append(f"-{blocked} blocked category")
         print(f"  {cls:28s} {len(found):5d} files"
-              f"{f'  (-{blocked} blocked category)' if blocked else ''}")
+              f"{'  (' + ', '.join(notes) + ')' if notes else ''}")
     if not all(per_class.values()):
         empty = [c for c, v in per_class.items() if not v]
         print(f"error: no images for {empty} -- run the harvest first",
@@ -412,6 +452,7 @@ def main() -> int:
         "dhash_radius": args.dhash_radius,
         "cross_class_conflicts": len(conflicted),
         "blocked_by_category": blocked_total,
+        "excluded_not_ground_level": off_list_total,
         "undecodable": undecodable,
         "scene_groups": len(groups),
         "splits": {},
