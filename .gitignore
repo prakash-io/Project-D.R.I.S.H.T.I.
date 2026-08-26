@@ -38,6 +38,7 @@ develop-eggs/
 # Native / mobile
 mobile-app/android/app/build/
 mobile-app/android/.gradle/
+mobile-app/android/local.properties
 mobile-app/ios/Pods/
 mobile-app/ios/build/
 *.xcuserstate
