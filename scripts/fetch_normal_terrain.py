@@ -57,6 +57,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIR = ROOT / "data" / "raw" / "vision" / "normal_terrain"
 
+
+def rel(path: Path) -> str:
+    """Path relative to ROOT for display, falling back to the absolute path.
+
+    `Path.relative_to` RAISES when the target is outside ROOT, and every call
+    site here is building a log line. That turned a cosmetic concern into a
+    crash the moment the script was pointed at a data directory in another
+    checkout -- which is exactly what happens under a git worktree, where the
+    code is versioned per worktree but the gitignored `data/` tree is not.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 #: Fetched larger than the 224 px training size on purpose: the training
 #: pipeline's own augmentation (random resized crop) needs room to crop into,
 #: and an image pre-scaled to exactly 224 would be upsampled by every crop.
@@ -159,7 +175,7 @@ def main() -> int:
     args = ap.parse_args()
 
     args.dir.mkdir(parents=True, exist_ok=True)
-    print(f"==> fetching {args.count} negatives into {args.dir.relative_to(ROOT)}")
+    print(f"==> fetching {args.count} negatives into {rel(args.dir)}")
 
     # Split between the two sources. Scene photographs are the more valuable
     # half, so they get the larger share.
@@ -219,7 +235,7 @@ def main() -> int:
     print(f"\n    downloaded {counts['ok']}, already present {counts['skip']}, "
           f"failed {counts['fail']}")
     print(f"    removed {duplicates} duplicate image(s) by content hash")
-    print(f"==> {remaining} unique negatives in {args.dir.relative_to(ROOT)}")
+    print(f"==> {remaining} unique negatives in {rel(args.dir)}")
 
     if failures:
         print(f"\n    first failures: {failures[:3]}")

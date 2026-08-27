@@ -169,14 +169,85 @@ Starting state: `scripts/fetch_normal_terrain.py` and `scripts/train_incident_yo
 exist. `.env.example` already carries `AUTO_BLOCK_ON_AI_VERDICT=0` and
 `INCIDENT_REQUIRE_REVIEW=1`. `data/` is gitignored and must be rebuilt locally.
 
-- [ ] 3.1 Confirm the `NORMAL_TERRAIN` safe class is final in the training pipeline
-- [ ] 3.2 Assert `INCIDENT_REQUIRE_REVIEW=1` and `AUTO_BLOCK_ON_AI_VERDICT=0`
-- [ ] 3.3 Write `rebuild_ai.sh` — fetch 1,467 normal-terrain images, run 40-epoch retrain
-- [ ] 3.4 Comment in the script exactly where real ground-level NER photos are dropped
+- [x] 3.1 Confirm the `NORMAL_TERRAIN` safe class is final in the training pipeline
+- [x] 3.2 Assert `INCIDENT_REQUIRE_REVIEW=1` and `AUTO_BLOCK_ON_AI_VERDICT=0`
+- [x] 3.3 Write `rebuild_ai.sh` — fetch 1,467 normal-terrain images, run 40-epoch retrain
+- [x] 3.4 Comment in the script exactly where real ground-level NER photos are dropped
 
-Verify: `bash -n scripts/rebuild_ai.sh` + `ai-services/.venv/bin/python -m pytest ai-services/tests -q`
+Verify: `bash scripts/rebuild_ai.sh` (see log) + `pytest ai-services/tests -q`
 
-Status: **pending**
+Status: **complete — verified 2026-08-28**
+
+The guardrails are **asserted, not merely documented.** `rebuild_ai.sh` refuses
+to train if `INCIDENT_REQUIRE_REVIEW != 1` or `AUTO_BLOCK_ON_AI_VERDICT != 0`,
+checking the environment first and `.env` second, because retraining is exactly
+the moment those quietly get flipped. It also fails after training if
+`NORMAL_TERRAIN` is absent from the model's class list — without a real safe
+class the softmax sums to 1 over two hazards and every photograph on earth
+becomes a flood or a landslide, which is the failure CLAUDE.md decision 4
+records.
+
+**Where ground-level NER photos go** (§3.4), verified against `pool_of()` in
+`train_incident_yolo.py` rather than assumed:
+
+    data/raw/vision/incident-yolo/{train,val,test}/images/
+        landslide_ner_0001.jpg  ->  ACTIVE_LANDSLIDE_DEBRIS
+        flood_ner_0001.jpg      ->  FLOODED_ROAD_OR_SUBMERGED
+
+The class comes from the filename prefix before the first underscore, so no
+label file and no code change is needed. Any other prefix is **silently
+skipped**, not misfiled — the script prints a skip count, and that count is the
+thing to check. Ordinary hazard-free road photos go to the flat
+`data/raw/vision/normal_terrain/` instead, which has its own filename-hashed
+split so adding more never moves an existing image between train and test.
+
+---
+
+### Task 3 — 2026-08-28
+
+Guardrail assertion, run with the flag deliberately flipped:
+
+    AUTO_BLOCK_ON_AI_VERDICT=1 bash scripts/rebuild_ai.sh
+      ok    INCIDENT_REQUIRE_REVIEW=1  (code default 1)
+      error AUTO_BLOCK_ON_AI_VERDICT is '1', must be '0'
+    exit 1 — training never started
+
+Full path, end to end (`--epochs 1` for the test; the default is 40). The real
+40-epoch model was backed up first and restored afterwards:
+
+    ==> preflight            ultralytics, torch, pillow present
+                             source hazard images: 1380
+    ==> review guardrails    both ok
+    ==> NORMAL_TERRAIN negatives   present: 1467 / 1467
+    ==> training yolov8n-cls, 1 epochs      ... total 82.2s
+    ==> verify
+      classes: ACTIVE_LANDSLIDE_DEBRIS, FLOODED_ROAD_OR_SUBMERGED, NORMAL_TERRAIN
+      top-1:   0.9739
+        FLOODED_ROAD_OR_SUBMERGED          n=  92  recall=0.8913
+        ACTIVE_LANDSLIDE_DEBRIS            n= 116  recall=0.9914
+        NORMAL_TERRAIN                     n= 213  recall=1.0000
+
+Restored afterwards and confirmed: `epochs = 40, top1 = 0.9905`, three classes.
+
+`pytest ai-services/tests -q` (branch code, real artefacts) — **57 passed, 6
+skipped**.
+
+Three bugs found by running rather than reading:
+
+1. **`import importlib` does not bind `importlib.util`.** My preflight would
+   have reported "missing training dependencies" on every healthy venv.
+2. **`Path.relative_to(ROOT)` raises** when pointed outside its own checkout,
+   and both existing scripts used it to build *log lines*. That crashed the
+   training run outright under a worktree. Both now use a tolerant `rel()`.
+3. **The verify block read meta keys that do not exist** (`classes`,
+   `metrics.top1`), printing an empty class list. The real keys are
+   `classes_model_index_order` and `test.top1` — and the model-index order is
+   the one that matters, since the data.yaml order can differ and would
+   mislabel every probability the service reports.
+
+Also added `DRISHTI_DATA_ROOT`, because `data/` and the venv are gitignored and
+a worktree therefore has the code but not the 104 MB of images — duplicating
+the dataset per worktree would be worse than the inconvenience.
 
 ---
 
