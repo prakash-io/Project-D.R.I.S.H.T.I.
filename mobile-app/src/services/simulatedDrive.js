@@ -22,7 +22,7 @@ const toDeg = (r) => (r * 180) / Math.PI;
 
 /** Haversine, metres. The corridor spans ~1.5 degrees of latitude, which is
  *  far too much for a flat-earth approximation to stay honest over. */
-function haversine([lng1, lat1], [lng2, lat2]) {
+export function haversine([lng1, lat1], [lng2, lat2]) {
   const dLat = toRad(lat2 - lat1);
   const dLng = toRad(lng2 - lng1);
   const a = Math.sin(dLat / 2) ** 2
@@ -31,7 +31,7 @@ function haversine([lng1, lat1], [lng2, lat2]) {
 }
 
 /** Initial bearing in degrees, 0-360. This is what the HUD compass reads. */
-function bearing([lng1, lat1], [lng2, lat2]) {
+export function bearing([lng1, lat1], [lng2, lat2]) {
   const p1 = toRad(lat1);
   const p2 = toRad(lat2);
   const dl = toRad(lng2 - lng1);
@@ -44,7 +44,7 @@ function bearing([lng1, lat1], [lng2, lat2]) {
  *  Over a single graph edge -- tens of metres -- the great-circle and the
  *  straight line differ by far less than GNSS noise, so this is exact enough
  *  and avoids a slerp per tick. */
-function lerp([lng1, lat1], [lng2, lat2], t) {
+export function lerp([lng1, lat1], [lng2, lat2], t) {
   return [lng1 + (lng2 - lng1) * t, lat1 + (lat2 - lat1) * t];
 }
 
@@ -55,7 +55,7 @@ function lerp([lng1, lat1], [lng2, lat2], t) {
  * vertices, and re-walking that every second to find the current segment
  * would be O(n) per fix for no reason.
  */
-function measure(coordinates) {
+export function measure(coordinates) {
   const cum = [0];
   for (let i = 1; i < coordinates.length; i += 1) {
     cum.push(cum[i - 1] + haversine(coordinates[i - 1], coordinates[i]));

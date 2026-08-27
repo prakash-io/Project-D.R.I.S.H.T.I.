@@ -100,6 +100,7 @@ mobile-app/native/test/test_bridge
 # source next to it.
 mobile-app/native/test/test_bridge
 mobile-app/native/test/test_dead_reckoning
+mobile-app/native/test/sim_drive_track
 *.o
 
 # Compiled mission harness for the edge engine. Rebuilt on demand by

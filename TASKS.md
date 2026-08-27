@@ -70,14 +70,96 @@ substitutes the **online GNSS** source only. In the dark zone the EKF is fed by 
 handset IMU, which on a stationary desk phone produces a truck that does not move —
 so the offline half of the demo cannot currently be shown.
 
-- [ ] 1.1 Audit and confirm the existing toggle path end to end
-- [ ] 1.2 Feed the simulated corridor into the dark-zone/EKF path so offline tracking demonstrates
-- [ ] 1.3 Confirm the real-GNSS path is untouched when `isSimulated === false`
-- [ ] 1.4 Confirm no change to the flat C API or the socket payload
+- [x] 1.1 Audit and confirm the existing toggle path end to end
+- [x] 1.2 Feed the simulated corridor into the dark-zone/EKF path so offline tracking demonstrates
+- [x] 1.3 Confirm the real-GNSS path is untouched when `isSimulated === false`
+- [x] 1.4 Confirm no change to the flat C API or the socket payload
 
-Verify: `node mobile-app/verify_parse.mjs` + `make -C mobile-app/native/test run`
+Verify: `cd mobile-app && npm run verify && npm run test:darkzone`
+plus `make -C mobile-app/native/test run`
 
-Status: **pending**
+Status: **complete — verified 2026-08-28**
+
+What was already there, and what was missing. The toggle, `SourceToggle.jsx`,
+`Tracker.setSimulated()`, `setCorridor()` and `simulatedDrive.js` all existed
+and were correct. They substitute the **GNSS receiver**, which covers workflow
+section 1. They do nothing for section 2, because dead reckoning is not fed by
+the position source — it is fed by the IMU. A handset on a desk with the
+network pulled produced a *correct* dark zone in which the truck did not move,
+and no amount of toggle wiring could have shown otherwise.
+
+So `src/services/simulatedImu.js` synthesises the inertial stream a truck
+driving the corridor would produce, and `startOffline` substitutes the inertial
+sensor the same way `startOnline` substitutes the receiver. Everything
+downstream is the same code: `edge.pushImu`, the C++ decimator, the EKF, the
+R\*Tree matcher, the WatermelonDB rows, the burst sync.
+
+`swapInertialSource()` exchanges the sensor **without restarting the engine**,
+so flipping the toggle mid-blackout does not discard the EKF's accumulated
+state and covariance — the only position estimate the driver has at that
+moment.
+
+Honest about what is simulated: the speed measurement is injected at the speed
+model's own held-out error (sigma 5.259 m/s, `kSpeedMeasurementVariance`), not
+cleanly, so the drift shown is the drift the real model would produce. Feeding
+the TFLite CNN synthetic vibration would be meaningless — it was trained on
+IO-VNBD recordings of real vehicles.
+
+---
+
+### Task 1 — 2026-08-28
+
+`cd mobile-app && npm run verify`
+
+    51 files scanned, 0 banned runtime call(s)
+    no web/Node-only globals reach the handset
+    49 files parsed, 0 failure(s)
+    14 checks passed          # test/simulated_imu.test.mjs
+
+`make -C mobile-app/native/test run`
+
+    54 checks, 0 failures     # C++ EKF, map matcher, flat C API — unchanged
+
+`npm run test:darkzone` — the new end-to-end. Generates the stream with
+`SimulatedImu` and drives it through the REAL C++ engine against the shipped
+104 MB road graph, on Guwahati → Shillong (4,411 vertices):
+
+    1200 decimated fixes, match every 50
+    profile:  t+0s 0m  t+30s 12m  t+60s 4m  t+90s 3m  t+120s 9m
+    speed:    seeded 0 -> final 13.91 m/s (true 13.89)
+    ok  the dead-reckoned track stays on the corridor   mean 16.1 m, worst 54.5 m
+    ok  the R*Tree map matcher engaged                  24 of 1200 fixes
+    ok  the EKF acquired speed from the injected measurements
+    ok  the truck actually travelled                    1.19 km in 120s
+
+Four things this found that reading could not:
+
+1. **Yaw rate of 157 rad/s at every polyline vertex.** A corridor turns corners
+   instantaneously; a real MEMS gyro saturates near 35 rad/s. The stream was
+   replaying vertices rather than simulating a vehicle. Now rate-limited to
+   45 deg/s, with speed cut through corners so heading stays consistent with
+   motion — measured on this corridor, 90% of bends need under 22 deg/s but
+   1.9% demand more than 45 and the worst hairpin asks 569.
+2. **Speed injected at 1 Hz instead of the model's 10 Hz** (`kModelRateHz`).
+   The measurement is deliberately weak, so the filter depends on averaging
+   many; at a tenth of the rate the estimate drifted past the matcher's 60 m
+   acceptance radius after ~40 s and the track ran 622 m wide.
+3. **The test was flaky in a way that hid both.** Unseeded, the same
+   configuration produced 43 m and 399 m of worst-case deviation on
+   consecutive runs. `SimulatedImu` now takes an injectable `random`;
+   the tests seed it.
+4. **One assertion passed vacuously.** `Math.max(...[])` is `-Infinity`, which
+   satisfies any upper bound — the yaw-limit check was "passing" on an empty
+   sample set. `peakYaw()` now refuses an empty set.
+
+Noted for hardware testing, not fixed: map-match outcomes are **sensitive to
+where the matches land**, not simply to how often. Sweeping the interval over
+one seeded stream gave 54 m (5 s), 321 m (2.5 s), 520 m (1 s) and 43 m (0.5 s)
+— non-monotonic, because a match taken near a junction can snap to the wrong
+edge and drag the heading onto it. The shipped 5 s interval performs well here;
+this is a real characteristic of the matcher on dense road networks and is
+worth watching on a handset, and no interval change was made on the strength
+of one corridor.
 
 ---
 
