@@ -18,8 +18,15 @@ function Toggle({ label, checked, onChange, tone, badge }) {
   const on = {
     danger: 'border-danger bg-danger/10 text-phosphor',
     live: 'border-live bg-live/10 text-phosphor',
+    // Corridors are infrastructure, not status, so the "on" state is carried
+    // by the hairline going active rather than by a colour. Same reason the
+    // deck.gl layer is phosphor grey: a fourth accent would out-shout the
+    // three that actually encode something.
+    route: 'border-edge-active bg-surface text-phosphor',
   }[tone];
-  const dot = { danger: 'bg-danger', live: 'bg-live' }[tone];
+  const dot = {
+    danger: 'bg-danger', live: 'bg-live', route: 'bg-muted',
+  }[tone];
 
   return (
     <button
@@ -46,6 +53,7 @@ export default function ControlBar({
   showTrucks, setShowTrucks,
   showRisk, setShowRisk,
   riskCount, riskLoading, threshold,
+  showCorridors, setShowCorridors, corridorCount, corridorLoading,
 }) {
   return (
     <header className="crt relative z-10 flex items-stretch border-b border-edge bg-panel">
@@ -69,6 +77,13 @@ export default function ControlBar({
           onChange={setShowRisk}
           tone="danger"
           badge={riskLoading ? '…' : riskCount}
+        />
+        <Toggle
+          label="Corridors"
+          checked={showCorridors}
+          onChange={setShowCorridors}
+          tone="route"
+          badge={corridorLoading ? '…' : corridorCount}
         />
         {showRisk && (
           <span className="meta hidden xl:inline">

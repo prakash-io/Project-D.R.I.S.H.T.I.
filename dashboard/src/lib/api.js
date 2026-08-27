@@ -36,3 +36,14 @@ export const getRiskSegments = (min = 0.85, limit = 2000) =>
   json(`/risk/segments?min=${min}&limit=${limit}`);
 
 export const incidentPhotoUrl = (id) => `${API_URL}/incidents/${id}/photo`;
+
+// The demonstration corridors, planned by pgr_astar over `routable_edges`.
+//
+// Geometry is opt-in on the API because the raw paths are 1k-9k points each
+// and the picker only needs the endpoints. The dispatcher view does want the
+// lines, so it asks for them -- simplified, since 40 m of Douglas-Peucker
+// tolerance is well under a line width at the zooms this overlay is read at
+// and cuts the payload by roughly an order of magnitude (4411 -> 309 points
+// on Guwahati-Shillong).
+export const getCorridors = () =>
+  json('/routes/corridors?geometry=1&simplify_m=40');

@@ -6,12 +6,16 @@ import CommandRail from './components/CommandRail';
 import { useTelemetry } from './hooks/useTelemetry';
 import { useIncidents } from './hooks/useIncidents';
 import { useRiskSegments } from './hooks/useRiskSegments';
+import { useCorridors } from './hooks/useCorridors';
 
 const RISK_THRESHOLD = 0.85;
 
 export default function App() {
   const [showTrucks, setShowTrucks] = useState(true);
   const [showRisk, setShowRisk] = useState(false);
+  // On by default: with no truck moving, the corridors are the only thing
+  // that tells a dispatcher opening the console what this platform routes.
+  const [showCorridors, setShowCorridors] = useState(true);
   const [incidentPing, setIncidentPing] = useState(null);
   const [selectedTruck, setSelectedTruck] = useState(null);
 
@@ -22,6 +26,7 @@ export default function App() {
     enabled: showRisk,
     threshold: RISK_THRESHOLD,
   });
+  const { corridors, loading: corridorLoading } = useCorridors();
 
   const dr = selectedTruck?.source === 'ekf';
 
@@ -32,6 +37,7 @@ export default function App() {
         connected={connected}
         unitCount={trucks.length}
         segmentCount={showRisk ? features.length : 0}
+        corridorCount={showCorridors ? corridors.length : 0}
         queueCount={incidents.length}
       />
 
@@ -47,6 +53,10 @@ export default function App() {
           riskCount={features.length}
           riskLoading={loading}
           threshold={RISK_THRESHOLD}
+          showCorridors={showCorridors}
+          setShowCorridors={setShowCorridors}
+          corridorCount={corridors.length}
+          corridorLoading={corridorLoading}
         />
 
         <div className="flex min-h-0 flex-1">
@@ -57,6 +67,8 @@ export default function App() {
               showRisk={showRisk}
               showTrucks={showTrucks}
               onTruckClick={setSelectedTruck}
+              corridors={corridors}
+              showCorridors={showCorridors}
             />
 
             {selectedTruck && (

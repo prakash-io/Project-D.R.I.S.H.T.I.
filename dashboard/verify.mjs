@@ -205,6 +205,38 @@ async function main() {
     ? ok('basemap inverted, deck.gl untouched', flipped.base)
     : fail('basemap inversion scoping', flip);
 
+  // -------------------------------------------------- 4.1b planned corridors
+  // The demonstration routes come from the road dataset via pgr_astar, not
+  // from hand-drawn coordinates. Two things are asserted separately: that the
+  // console actually fetched them, and that every one it kept has geometry --
+  // a corridor row whose planning failed is stored with a null route, and
+  // showing it in the badge without a line on the map would overstate
+  // coverage.
+  const corridorCalls = requests.filter((r) => r.url.includes('/routes/corridors'));
+  corridorCalls.length > 0 && corridorCalls[0].status === 200
+    ? ok('GET /routes/corridors', `HTTP ${corridorCalls[0].status}`)
+    : fail('/routes/corridors', JSON.stringify(corridorCalls));
+
+  const corridorBadge = await cdp.eval(
+    `document.body.innerText.match(/Corridors\\s*(\\d+)/)?.[1] ?? '0'`);
+  Number(corridorBadge) > 0
+    ? ok('corridors drawn from the road network', `${corridorBadge} routes`)
+    : fail('corridors', 'none rendered');
+
+  const corridorGeom = await cdp.eval(`(async () => {
+    const r = await fetch('${BACKEND}/routes/corridors?geometry=1&simplify_m=40');
+    const b = await r.json();
+    const cs = b.corridors ?? [];
+    const withGeom = cs.filter((c) => (c.geometry?.coordinates?.length ?? 0) >= 2);
+    const edges = withGeom.reduce((n, c) => n + (c.edge_count ?? 0), 0);
+    return JSON.stringify({ total: cs.length, withGeom: withGeom.length, edges });
+  })()`);
+  const cg = JSON.parse(corridorGeom.startsWith('{') ? corridorGeom : '{}');
+  (cg.withGeom === cg.total && cg.total > 0 && cg.edges > 0)
+    ? ok('every corridor is a real routed path',
+         `${cg.total} corridors over ${cg.edges} graph edges`)
+    : fail('corridor geometry', corridorGeom);
+
   // ------------------------------------------------------ 4.2 live telemetry
   console.log('\n4.2  Live telemetry over Socket.IO');
   const readPackets = () => cdp.eval(

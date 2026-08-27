@@ -13,9 +13,46 @@ function riskColor(score) {
   return [248, 81, 73, 140 + Math.round(t * 115)];
 }
 
-export default function MapView({ trucks, riskFeatures, showRisk, showTrucks, onTruckClick }) {
+export default function MapView({
+  trucks, riskFeatures, showRisk, showTrucks, onTruckClick,
+  corridors, showCorridors,
+}) {
   const layers = useMemo(() => {
     const built = [];
+
+    // Pushed FIRST so it draws under everything else. A planned corridor is
+    // infrastructure, not telemetry -- if it sat over a risk segment it would
+    // hide the one thing the dispatcher is scanning for.
+    //
+    // Phosphor rather than a new hue. Section 4 allows red as the alert accent
+    // plus the two encoded telemetry colours (GNSS blue, dead-reckoning
+    // amber); a fourth semantic colour here would compete with all three.
+    //
+    // Phosphor and not the muted grey it started as, though. Grey was chosen
+    // to let the corridor recede as infrastructure, and measured against the
+    // rendered console that failed: after inversion Bhuvan draws its OWN road
+    // hairlines in almost exactly #8A8A8A, so toggling the layer changed
+    // 5,492 pixels and a dispatcher could not tell a planned corridor from
+    // any other road on the basemap. #EAEAEA is the readout colour -- the
+    // colour everything else that is DATA rather than ground is drawn in --
+    // which is the right semantic and clears the basemap by contrast without
+    // spending a hue.
+    if (showCorridors && corridors.length > 0) {
+      built.push(new PathLayer({
+        id: 'corridors',
+        data: corridors,
+        getPath: (c) => c.geometry.coordinates,
+        getColor: [234, 234, 234, 200],
+        // Pixels, not metres: this line marks a route, not a physical width,
+        // and it has to stay findable when the dispatcher zooms out to see
+        // the whole North East at once.
+        widthUnits: 'pixels',
+        getWidth: 3,
+        capRounded: true,
+        jointRounded: true,
+        pickable: true,
+      }));
+    }
 
     if (showRisk && riskFeatures.length > 0) {
       built.push(new PathLayer({
@@ -75,7 +112,7 @@ export default function MapView({ trucks, riskFeatures, showRisk, showTrucks, on
     }
 
     return built;
-  }, [trucks, riskFeatures, showRisk, showTrucks, onTruckClick]);
+  }, [trucks, riskFeatures, showRisk, showTrucks, onTruckClick, corridors, showCorridors]);
 
   return (
     <DeckGL
@@ -84,6 +121,15 @@ export default function MapView({ trucks, riskFeatures, showRisk, showTrucks, on
       layers={layers}
       getTooltip={({ object }) => {
         if (!object) return null;
+        // Corridor first: it also carries a `name`, so testing it after the
+        // risk branch would be fine but after the truck branch would not.
+        if (object.origin_name) {
+          return {
+            text: `${object.name}\n`
+              + `${(object.distance_m / 1000).toFixed(0)} km · `
+              + `${object.edge_count} segments`,
+          };
+        }
         if (object.properties?.risk_score !== undefined) {
           return {
             text: `${object.properties.name ?? 'unnamed road'}\n`

@@ -20,7 +20,9 @@ function RailStat({ label, value, tone = 'text-phosphor' }) {
   );
 }
 
-export default function CommandRail({ connected, unitCount, segmentCount, queueCount }) {
+export default function CommandRail({
+  connected, unitCount, segmentCount, corridorCount, queueCount,
+}) {
   return (
     <nav
       aria-label="System status"
@@ -63,6 +65,9 @@ export default function CommandRail({ connected, unitCount, segmentCount, queueC
         </div>
 
         <div className="bg-panel"><RailStat label="Units" value={unitCount} tone="text-live" /></div>
+        <div className="bg-panel">
+          <RailStat label="Rte" value={corridorCount} tone="text-dim" />
+        </div>
         <div className="bg-panel">
           <RailStat label="Seg" value={segmentCount}
                     tone={segmentCount > 0 ? 'text-danger-text' : 'text-muted'} />

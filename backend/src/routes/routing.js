@@ -42,6 +42,72 @@ routingRouter.post('/routes/plan', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+/**
+ * GET /routes/corridors -- the named demonstration corridors (migration 009).
+ *
+ * Geometry is opt-in because it is big: the ten corridors together carry
+ * ~44,000 coordinates, and a driver client that only needs to populate a
+ * picker should not pull a megabyte to do it.
+ *
+ *   ?geometry=1        include planned_route
+ *   ?simplify_m=25     Douglas-Peucker tolerance in METRES before sending
+ *
+ * simplify_m is for overview rendering only. Simplifying to 25 m drops the
+ * point count by roughly an order of magnitude while staying well inside the
+ * width of the road as drawn; it must NOT be used to feed the simulated drive,
+ * which follows the geometry vertex by vertex and would visibly corner-cut.
+ */
+routingRouter.get('/routes/corridors', async (req, res, next) => {
+  try {
+    const withGeometry = req.query.geometry === '1' || req.query.geometry === 'true';
+    // Clamped rather than trusted: an unbounded tolerance would collapse a
+    // corridor to a straight line between its endpoints, which is exactly the
+    // fiction the corridors table exists to avoid.
+    const simplifyM = Math.max(0, Math.min(Number(req.query.simplify_m ?? 0) || 0, 500));
+
+    // ST_Simplify works in the units of its input, so the geography is cast to
+    // 3857 (metres) for the tolerance to mean metres, then back to 4326.
+    const geomSql = !withGeometry ? 'NULL::json' : (simplifyM > 0
+      ? `ST_AsGeoJSON(ST_Transform(ST_Simplify(
+           ST_Transform(planned_route::geometry, 3857), ${simplifyM}), 4326))::json`
+      : 'ST_AsGeoJSON(planned_route::geometry)::json');
+
+    const { rows } = await query(
+      `SELECT id, name, origin_name, destination_name,
+              ST_Y(origin::geometry)      AS origin_lat,
+              ST_X(origin::geometry)      AS origin_lng,
+              ST_Y(destination::geometry) AS destination_lat,
+              ST_X(destination::geometry) AS destination_lng,
+              distance_m, edge_count, planned_at,
+              ST_NPoints(planned_route::geometry) AS point_count,
+              ${geomSql} AS geometry
+         FROM corridors
+        ORDER BY sort_order, id`);
+
+    res.json({ corridors: rows });
+  } catch (error) { next(error); }
+});
+
+/** GET /routes/corridors/:id -- one corridor, always with full geometry. */
+routingRouter.get('/routes/corridors/:id', async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, name, origin_name, destination_name,
+              ST_Y(origin::geometry)      AS origin_lat,
+              ST_X(origin::geometry)      AS origin_lng,
+              ST_Y(destination::geometry) AS destination_lat,
+              ST_X(destination::geometry) AS destination_lng,
+              distance_m, edge_count, planned_at,
+              ST_NPoints(planned_route::geometry) AS point_count,
+              ST_AsGeoJSON(planned_route::geometry)::json AS geometry
+         FROM corridors WHERE id = $1`,
+      [req.params.id]);
+
+    if (rows.length === 0) return res.status(404).json({ error: 'no such corridor' });
+    res.json({ corridor: rows[0] });
+  } catch (error) { next(error); }
+});
+
 /** POST /trips  { truck_id, from, to } -- start a trip with a planned route. */
 routingRouter.post('/trips', async (req, res, next) => {
   try {
