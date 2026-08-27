@@ -18,6 +18,9 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+/// Mirrors the CHECK constraint on incidents.kind (migration 001).
+const REPORTABLE_KINDS = new Set(['landslide', 'flood', 'obstruction']);
+
 /**
  * Persist the driver's photo.
  *
@@ -77,6 +80,19 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       return res.status(400).json({ error: 'lat and lng are required numbers' });
     }
+    // What the driver says it is. Whitelisted against the table's own CHECK
+    // constraint rather than passed through, so a bad value is a 400 here
+    // instead of a 500 out of Postgres. Advisory only -- it never blocks a
+    // road on its own, it just stops the driver's account of the hazard being
+    // thrown away when the model cannot corroborate it.
+    const rawKind = req.body?.kind;
+    if (rawKind != null && !REPORTABLE_KINDS.has(rawKind)) {
+      return res.status(400).json({
+        error: `kind must be one of ${[...REPORTABLE_KINDS].join(', ')}`,
+      });
+    }
+    const reportedKind = rawKind ?? null;
+
     if (!req.file) return res.status(400).json({ error: 'a photo file is required' });
     if (!ALLOWED_IMAGE_TYPES.has(req.file.mimetype)) {
       return res.status(415).json({
@@ -111,16 +127,31 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
       if (error instanceof AiServiceError) {
         // Record it anyway, unclassified. Losing a driver's landslide report
         // because a model was down is worse than a row that needs a human.
+        //
+        // Queued for a dispatcher, not parked in 'pending': the review panel
+        // asks for `pending_dispatcher_approval` and nothing else, so a row
+        // written under any other name is invisible on the board -- which is
+        // indistinguishable, to everyone involved, from never having been
+        // sent. An unclassified report needs a human MORE than a classified
+        // one, not less.
         const pending = await insertIncident({
           lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
-          kind: 'obstruction', status: 'pending', confidence: null,
-          aiClass: null, aiReviewed: false, photoPath, clientUid,
+          kind: reportedKind ?? 'obstruction', status: 'pending_dispatcher_approval',
+          confidence: null, aiClass: null, aiReviewed: false, photoPath, clientUid,
+        });
+        // ...and announced. The board is driven by this broadcast; without it
+        // the report waits for whenever someone next reloads the page.
+        broadcast(INCIDENT_EVENT, {
+          ...pending,
+          ai: { available: false, error: error.message },
+          snapped_to_edge: snap.edgeId,
         });
         return res.status(202).json({
           incident: pending,
           snapped_to_edge: snap.edgeId,
           distance_m: snap.distanceM,
           ai: { available: false, error: error.message },
+          awaiting_dispatcher: true,
           note: 'stored unclassified; the AI service was unreachable',
         });
       }
@@ -132,16 +163,32 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
 
     // 'verified' is the only status routable_edges honours, so this single
     // choice decides whether a road closes.
-    let status = 'rejected';
-    if (blockable) {
-      status = needsHuman && !config.autoBlockOnAiVerdict
-        ? 'pending_dispatcher_approval'
-        : 'verified';
+    //
+    // What it does NOT decide is whether a person ever sees the report. A
+    // model that does not confirm a hazard sends the photo to the dispatcher
+    // exactly as one that does; the difference is carried on the card, as
+    // dissent for a human to weigh, and `rejected` is reserved for a verdict
+    // a human actually reached.
+    //
+    // Auto-rejecting was a real defect and not a hypothetical one. Both hazard
+    // classes were trained on satellite and aerial imagery while this endpoint
+    // receives ground-level phone photos, so NORMAL_TERRAIN is the CONFIDENT,
+    // EXPECTED answer for a genuine landslide (CLAUDE.md, open Q8). Treating
+    // it as final meant the model quietly overruling the one participant who
+    // was actually standing on the road -- and the handset, reading 201,
+    // deleted its only copy of the photograph.
+    let status = 'pending_dispatcher_approval';
+    if (blockable && !needsHuman && config.autoBlockOnAiVerdict) {
+      status = 'verified';
     }
 
     const incident = await insertIncident({
       lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
-      kind: verdict.incident_kind ?? 'obstruction',
+      // The model's class when it found one, otherwise what the DRIVER called
+      // it. Falling straight through to 'obstruction' discarded the only
+      // first-hand account of the hazard on the strength of a verdict that
+      // just said it could not see one.
+      kind: verdict.incident_kind ?? reportedKind ?? 'obstruction',
       status, confidence: verdict.confidence ?? null,
       aiClass: verdict.predicted_class ?? null, aiReviewed: true, photoPath, clientUid,
     });
@@ -170,8 +217,15 @@ incidentsRouter.get('/', async (req, res, next) => {
   try {
     const status = req.query.status ?? null;
     const { rows } = await query(
-      `SELECT id, kind, status, confidence, ai_class, blocked_edge,
+      `SELECT id, kind, status, confidence, ai_class, ai_reviewed, blocked_edge,
               photo_path IS NOT NULL AS has_photo,
+              -- Did the model back the driver up? Computed here so the panel
+              -- and any other client cannot disagree about what counts as
+              -- agreement. NULL means the model never ran at all, which is a
+              -- third state and must not read as "it said no".
+              CASE WHEN NOT ai_reviewed THEN NULL
+                   ELSE (ai_class IS NOT NULL AND ai_class <> 'NORMAL_TERRAIN')
+              END AS model_agrees,
               ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at, verified_at,
               approved_by, approved_at
        FROM incidents

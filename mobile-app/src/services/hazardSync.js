@@ -83,6 +83,12 @@ export async function drainHazards(database, { apiUrl, truckId, onProgress }) {
     form.append('lat', String(report.latitude));
     form.append('lng', String(report.longitude));
     form.append('client_uid', report.clientUid);
+    // The driver's own classification. It was stored by queueHazard and then
+    // never sent, so every report reached the backend as an anonymous photo
+    // and came back as the generic 'obstruction' fallback -- the driver's
+    // account of what they were looking at was collected and then dropped on
+    // the floor one function later.
+    if (report.kind) form.append('kind', report.kind);
     if (truckId) form.append('truck_id', truckId);
 
     let response;
