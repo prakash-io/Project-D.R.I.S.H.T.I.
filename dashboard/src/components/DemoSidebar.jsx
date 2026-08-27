@@ -18,6 +18,16 @@ function km(metres) {
   return Number.isFinite(metres) ? `${(metres / 1000).toFixed(1)} km` : '—';
 }
 
+/// 8527 -> "2h 22m". The planner's own estimate, costed per edge from road
+/// class and curvature -- see backend/src/services/travelTime.js, which is
+/// explicit that this is an assumption and not a measured model.
+function hm(seconds) {
+  if (!Number.isFinite(seconds)) return '—';
+  const total = Math.round(seconds / 60);
+  const h = Math.floor(total / 60);
+  return h === 0 ? `${total}m` : `${h}h ${String(total % 60).padStart(2, '0')}m`;
+}
+
 function RouteButton({ corridor, active, pending, disabled, onSelect }) {
   return (
     <button
@@ -121,9 +131,15 @@ export default function DemoSidebar({
               clear
             </button>
           </div>
-          <output className="mt-1.5 block font-mono text-[15px] leading-none text-phosphor">
-            {km(route.distance_m)}
-          </output>
+          <div className="mt-1.5 flex items-baseline gap-2">
+            <output className="font-mono text-[15px] leading-none text-phosphor">
+              {km(route.distance_m)}
+            </output>
+            <span aria-hidden className="text-[10px] text-edge-active">·</span>
+            <output className="font-mono text-[15px] leading-none text-dim">
+              {hm(route.estimated_time_sec)}
+            </output>
+          </div>
           <p className="meta mt-1.5 leading-none">{route.edge_count} edges routed</p>
         </div>
       ) : (

@@ -36,6 +36,7 @@ routingRouter.post('/routes/plan', async (req, res, next) => {
 
     res.json({
       distance_m: route.distanceM,
+      estimated_time_sec: route.durationSec,
       edge_count: route.edges.length,
       geometry: route.geometry,
     });

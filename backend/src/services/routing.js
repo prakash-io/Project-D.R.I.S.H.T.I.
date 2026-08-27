@@ -3,6 +3,7 @@
 // exercise exactly the same code path.
 import { query } from '../db.js';
 import { config } from '../config.js';
+import { estimateDurationSec } from './travelTime.js';
 
 /**
  * Shortest path between two coordinates, honouring blocked edges (API-04).
@@ -12,14 +13,24 @@ import { config } from '../config.js';
  * risk, 1 makes a 1.0-risk road cost double.
  */
 export async function routeBetween(from, to, { riskWeight = 0 } = {}) {
+  // length_m is ST_Length over geography -- true metres on the ellipsoid, and
+  // NOT the same quantity as `cost`. cost carries the risk weighting, so with
+  // riskWeight > 0 it is inflated above the physical distance: reporting it as
+  // a distance would tell the driver a pre-emptive reroute is longer than the
+  // road actually is. highway/surface come along for the speed model.
   const { rows } = await query(
-    `SELECT seq, edge_id, cost,
-            ST_AsGeoJSON(edge_geom) AS geojson
+    `SELECT r.seq, r.edge_id, r.cost,
+            ST_Length(r.edge_geom::geography) AS length_m,
+            ST_Distance(ST_StartPoint(r.edge_geom)::geography,
+                        ST_EndPoint(r.edge_geom)::geography) AS straight_m,
+            e.highway, e.surface,
+            ST_AsGeoJSON(r.edge_geom) AS geojson
      FROM route_astar(
             ST_SetSRID(ST_MakePoint($1, $2), 4326),
             ST_SetSRID(ST_MakePoint($3, $4), 4326),
-            $5)
-     ORDER BY seq`,
+            $5) r
+     LEFT JOIN road_edges e ON e.id = r.edge_id
+     ORDER BY r.seq`,
     [from.lng, from.lat, to.lng, to.lat, riskWeight],
   );
 
@@ -46,9 +57,23 @@ export async function routeBetween(from, to, { riskWeight = 0 } = {}) {
     }
   }
 
+  const edges = rows.map((r) => ({
+    seq: r.seq,
+    edgeId: r.edge_id,
+    cost: Number(r.cost),
+    lengthM: Number(r.length_m),
+    straightM: Number(r.straight_m),
+    highway: r.highway,
+    surface: r.surface,
+  }));
+
   return {
-    edges: rows.map((r) => ({ seq: r.seq, edgeId: r.edge_id, cost: Number(r.cost) })),
-    distanceM: rows.reduce((sum, r) => sum + Number(r.cost), 0),
+    edges,
+    // Physical length. `costM` keeps the weighted figure separately so a
+    // caller that wants to know what A* actually minimised still can.
+    distanceM: edges.reduce((sum, e) => sum + (Number.isFinite(e.lengthM) ? e.lengthM : 0), 0),
+    costM: rows.reduce((sum, r) => sum + Number(r.cost), 0),
+    durationSec: estimateDurationSec(edges),
     geometry: { type: 'LineString', coordinates },
   };
 }

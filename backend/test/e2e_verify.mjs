@@ -214,8 +214,19 @@ async function main() {
 
   await sleep(400);
   assert.ok(routeUpdates.length > 0, 'the driver never received a route_updated event');
+  const ru = routeUpdates[0];
+  assert.ok(ru.route_geom?.coordinates?.length >= 2,
+    'route_updated carried no usable route_geom');
+  assert.ok(Number.isFinite(ru.new_distance_m) && ru.new_distance_m > 0,
+    'route_updated carried no new_distance_m');
+  assert.ok(Number.isFinite(ru.estimated_time_sec) && ru.estimated_time_sec > 0,
+    'route_updated carried no estimated_time_sec');
+  assert.equal(ru.geometry, undefined,
+    'the superseded `geometry` key is still being duplicated onto the payload');
   ok(`driver received route_updated over Socket.IO ` +
-     `(${(routeUpdates[0].distance_m / 1000).toFixed(1)} km)`);
+     `(${(ru.new_distance_m / 1000).toFixed(1)} km, ` +
+     `${Math.round(ru.estimated_time_sec / 60)} min, ` +
+     `${ru.route_geom.coordinates.length} pts)`);
 
   // -------------------------------------------------------------- restore
   say('clear the incident -> the original route returns with zero cost writes');
