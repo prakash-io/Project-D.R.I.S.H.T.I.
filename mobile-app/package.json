@@ -2,12 +2,13 @@
   "name": "drishti-driver-client",
   "version": "1.0.0",
   "private": true,
-  "description": "D.R.I.S.H.T.I. driver client — online tracking, dark-zone dead reckoning, Burst Sync (Epic 4)",
+  "description": "D.R.I.S.H.T.I. driver client \u2014 online tracking, dark-zone dead reckoning, Burst Sync (Epic 4)",
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "start": "react-native start",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "verify": "node verify_runtime.mjs && node verify_parse.mjs"
   },
   "dependencies": {
     "@maplibre/maplibre-react-native": "^10.2.0",

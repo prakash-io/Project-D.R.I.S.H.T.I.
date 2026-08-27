@@ -19,7 +19,10 @@ import HazardScreen from './src/ui/HazardScreen';
 import DiagnosticsScreen from './src/ui/DiagnosticsScreen';
 import IncidentModal from './src/ui/IncidentModal';
 import RerouteAlert from './src/ui/RerouteAlert';
+import RerouteSheet from './src/ui/RerouteSheet';
 import RouteSummary from './src/ui/RouteSummary';
+import RoutePlanner, { HERE } from './src/ui/RoutePlanner';
+import SourceToggle from './src/ui/SourceToggle';
 import TabBar from './src/ui/TabBar';
 import Button from './src/ui/Button';
 import { Card, Stat } from './src/ui/Card';
@@ -36,6 +39,8 @@ import { ensureEdgeAssets } from './src/services/edgeAssets';
 import { refreshRouteHazards, cachedHazards, toFeatureCollection } from './src/services/hazards';
 import { speakAlert } from './src/services/voiceAlert';
 import { listCorridors, getCorridor, ensureTrip } from './src/services/corridors';
+import { listPlaces, planTrip, ackReroute, routeCoordinates }
+  from './src/services/routePlanner';
 
 // NOTE: process.env.* is NOT substituted by React Native's Babel preset --
 // only NODE_ENV is. Every one of these falls through to its literal default in
@@ -52,8 +57,11 @@ const ALERT_LANG = process.env.ALERT_LANG ?? 'as';
 // fix (socket, WatermelonDB queue, burst sync, backend ingest) is the live
 // path, untouched.
 //
-// Set SIM_DRIVE to false for a road test. Remember that process.env is not
-// substituted in a release bundle, so THIS DEFAULT IS WHAT SHIPS.
+// SIM_DRIVE is now only the STARTING position of a runtime toggle, not the
+// mode for the whole session -- the driver flips between the corridor drive
+// and this handset's GNSS from the map screen (SourceToggle). Remember that
+// process.env is not substituted in a release bundle, so THIS DEFAULT IS WHAT
+// SHIPS as the initial state.
 const SIM_DRIVE = (process.env.SIM_DRIVE ?? 'true') !== 'false';
 const SIM_CORRIDOR = process.env.SIM_CORRIDOR ?? 'ghy-shl';
 const SIM_SPEED_KMH = Number(process.env.SIM_SPEED_KMH ?? 60);
@@ -75,6 +83,20 @@ export default function App() {
   /// backend has costed a route -- the driver client does not estimate its
   /// own ETA, because the graph the estimate comes from lives on the server.
   const [routeEta, setRouteEta] = useState(null);
+  /// Where the position comes from. Runtime, not build-time: see SourceToggle.
+  const [isSimulated, setIsSimulated] = useState(SIM_DRIVE);
+  /// The routable place list feeding the origin/destination fields.
+  const [places, setPlaces] = useState([]);
+  const [origin, setOrigin] = useState(null);
+  const [destination, setDestination] = useState(null);
+  const [plannerOpen, setPlannerOpen] = useState(false);
+  const [planning, setPlanning] = useState(false);
+  const [planError, setPlanError] = useState(null);
+  /// A reroute the backend has OFFERED and the driver has not answered.
+  /// Holding it here rather than applying it is the whole accept flow: the
+  /// map keeps the road the driver chose until they tap Accept.
+  const [proposal, setProposal] = useState(null);
+  const [answering, setAnswering] = useState(false);
   const [corridors, setCorridors] = useState([]);
   const [corridorId, setCorridorId] = useState(SIM_CORRIDOR);
   const activeCorridor = useRef(null);
@@ -189,6 +211,9 @@ export default function App() {
           if (!disposed) setSpokenBy(spoken.spoken);
         },
 
+        // A detour has been costed for this truck. It arrives as an OFFER:
+        // nothing on the map changes until the driver taps Accept. See
+        // RerouteSheet for why that tap has to exist.
         onRouteUpdated: async (payload) => {
           // The reroute payload names its figures new_distance_m /
           // estimated_time_sec (workflow section 4). distance_m is still sent
@@ -196,8 +221,6 @@ export default function App() {
           // not been redeployed yet still drives the banner.
           const distanceM = payload?.new_distance_m ?? payload?.distance_m;
           const durationSec = payload?.estimated_time_sec;
-          setRouteEta({ distanceM, durationSec, rerouted: true });
-          setAlert(`Rerouted — ${(distanceM / 1000).toFixed(1)} km`);
           // The backend sends a GeoJSON LineString object, not a bare
           // coordinate array -- src/services/routing.js returns
           // `{ type: 'LineString', coordinates }` and incidents.js forwards it
@@ -208,20 +231,60 @@ export default function App() {
           // it rather than duplicated under both keys, because these paths run
           // to thousands of coordinates over a 3G link.
           const line = routeCoordinates(payload?.route_geom ?? payload?.geometry);
-          if (line) {
-            setRoute(line);
-            refreshHazards(line);
-          } else {
+          if (!line) {
             log('WARN', 'ROUTE_NO_GEOM', 'Reroute arrived without usable geometry.');
+            return;
           }
-          log('INFO', 'REROUTE',
-              `New route ${(distanceM / 1000).toFixed(1)} km`
+
+          // An older backend sends no reroute_id, so there is nothing the
+          // driver could answer and nothing to record their answer against.
+          // Applying it immediately is then the only honest option, and it is
+          // exactly what this client did before -- so a handset on a new build
+          // still works against a server that has not been redeployed.
+          if (!payload?.reroute_id || payload?.requires_ack === false) {
+            applyRoute(line, { distanceM, durationSec, rerouted: true });
+            setAlert(`Rerouted — ${(distanceM / 1000).toFixed(1)} km`);
+            log('INFO', 'REROUTE',
+                `New route ${(distanceM / 1000).toFixed(1)} km`
+                + (Number.isFinite(durationSec)
+                    ? `, about ${Math.round(durationSec / 60)} min.` : '.'));
+            try {
+              await speakAlert({
+                language: ALERT_LANG,
+                text: 'Warning: landslide ahead. Rerouting.',
+              });
+            } catch (error) {
+              console.warn('[tts]', error.message);
+            }
+            return;
+          }
+
+          setProposal({
+            rerouteId: payload.reroute_id,
+            coordinates: line,
+            distanceM,
+            durationSec,
+            deltaDistanceM: payload.delta_distance_m,
+            deltaTimeSec: payload.delta_time_sec,
+            kind: payload.incident?.kind ?? null,
+          });
+          log('WARN', 'REROUTE_OFFERED',
+              `Detour offered: ${(distanceM / 1000).toFixed(1)} km`
               + (Number.isFinite(durationSec)
-                  ? `, about ${Math.round(durationSec / 60)} min.` : '.'));
+                  ? `, about ${Math.round(durationSec / 60)} min.` : '.')
+              + ' Awaiting the driver.');
+
+          // Spoken, because the driver must not have to look down to learn
+          // there is a landslide ahead. The figures come with it: a driver who
+          // has heard "96 kilometres, 3 hours" can decide before the phone is
+          // even in view.
           try {
             await speakAlert({
               language: ALERT_LANG,
-              text: 'Warning: landslide ahead. Rerouting.',
+              text: hazardSentence(payload?.incident)
+                + ` A new route is available: ${(distanceM / 1000).toFixed(0)} kilometres`
+                + (Number.isFinite(durationSec)
+                    ? `, about ${Math.round(durationSec / 60)} minutes.` : '.'),
             });
           } catch (error) {
             console.warn('[tts]', error.message);
@@ -262,17 +325,50 @@ export default function App() {
       // The corridor the prototype drives, and the route the map draws. Both
       // come from the same pgr_astar geometry, so the line under the truck is
       // the line it is actually following -- not a decorative overlay.
+      // The destination list. Fetched whatever the position source is: a
+      // driver on real GNSS still has to be able to say where they are going.
+      // Never throws -- it answers from an on-device cache when dispatch is
+      // unreachable, which is the case a truck starting its shift in a valley
+      // is actually in.
+      const known = await listPlaces(API_URL);
+      if (!disposed) setPlaces(known);
+      if (known.length === 0) {
+        log('WARN', 'PLACES_EMPTY',
+          'No destinations available yet — the list will load when dispatch is reachable.');
+      }
+
+      // The corridor LIST is metadata only, ~3 KB, so it is fetched whatever
+      // the source: the picker has to be populated the moment the driver
+      // switches to the demonstration drive. The GEOMETRY is not -- one
+      // corridor runs to thousands of coordinates, and there is no reason to
+      // pull it on a session that never leaves real GNSS.
+      const list = await listCorridors(API_URL);
+      if (!disposed) setCorridors(list);
+
       let simulate = null;
       if (SIM_DRIVE) {
         try {
-          const list = await listCorridors(API_URL);
-          if (!disposed) setCorridors(list);
-
           const corridor = await getCorridor(API_URL, corridorId);
           activeCorridor.current = corridor;
           const coordinates = corridor?.geometry?.coordinates ?? [];
           if (coordinates.length >= 2) {
-            if (!disposed) setRoute(coordinates);
+            if (!disposed) {
+              setRoute(coordinates);
+              // The corridor's own distance, so the summary card is populated
+              // from launch rather than appearing for the first time when
+              // something goes wrong -- which is what taught the driver to
+              // read that card as bad news. No ETA: /routes/corridors does
+              // not carry one and this client will not invent it.
+              setRouteEta({ distanceM: corridor.distance_m, rerouted: false });
+              // Seed the planner fields from the corridor, so the two ends
+              // shown in the form are the ends of the road on the map. Left
+              // blank they would invite the driver to "plan" a route that is
+              // already drawn under their truck.
+              setOrigin(asPlace(known, corridor.origin_name,
+                corridor.origin_lat, corridor.origin_lng));
+              setDestination(asPlace(known, corridor.destination_name,
+                corridor.destination_lat, corridor.destination_lng));
+            }
             simulate = { coordinates, speedKmh: SIM_SPEED_KMH, loop: true };
 
             // Without an ACTIVE trip the backend accepts every fix over the
@@ -351,6 +447,160 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  /**
+   * Put a route on the map, and keep everything that depends on it in step.
+   *
+   * ONE path for every source of a route -- the boot corridor, the corridor
+   * picker, a plan the driver typed, an accepted detour. They used to each do
+   * their own subset of this, which is how the corridor picker ended up
+   * redrawing the line without moving the truck: a map showing a road the
+   * vehicle is not on is a worse lie than no map.
+   *
+   * setCorridor is called unconditionally and is deliberately cheap when the
+   * driver is on real GNSS: it STORES the geometry without starting a drive,
+   * so the demonstration toggle has something to run the moment it is flipped.
+   */
+  const applyRoute = (coordinates, eta) => {
+    setRoute(coordinates);
+    setRouteEta(eta ?? null);
+    tracker.current?.setCorridor(coordinates, SIM_SPEED_KMH);
+    refreshHazards(coordinates);
+  };
+
+  /// The driver's own position as a place, for "My location" as an origin.
+  /// Read from the ref rather than from `fix`, so a handler built on an
+  /// earlier render still routes from where the truck is now.
+  const fixAsPlace = () => {
+    const here = latestFix.current;
+    if (!here) return null;
+    return { id: HERE.id, name: HERE.name, lat: here.latitude, lng: here.longitude };
+  };
+
+  /**
+   * Plan the driver's route and open the trip on it.
+   *
+   * One server call does both -- see planTrip for why they are the same act.
+   * A failure is shown IN the planner card rather than as a passing banner:
+   * the driver is looking at the form, and the answer to "why did nothing
+   * happen" has to be where they are looking.
+   */
+  const planRoute = async () => {
+    if (planning) return;
+    const from = origin?.id === HERE.id ? fixAsPlace() : origin;
+    const to = destination;
+    if (!from) {
+      setPlanError('No position fix yet — "My location" cannot be used as a start.');
+      return;
+    }
+    if (!to || from.id === to.id) {
+      setPlanError('Choose two different places.');
+      return;
+    }
+
+    setPlanning(true);
+    setPlanError(null);
+    try {
+      const planned = await planTrip(API_URL, TRUCK_ID, from, to);
+      applyRoute(planned.coordinates, {
+        distanceM: planned.distanceM,
+        durationSec: planned.durationSec,
+        rerouted: false,
+      });
+      // Any outstanding offer was costed against a road the driver has just
+      // abandoned. Leaving it up would let them accept a detour around a
+      // hazard that is no longer on their way.
+      setProposal(null);
+      setPlannerOpen(false);
+      log('INFO', 'ROUTE_PLANNED',
+        `${from.name} → ${to.name}: ${(planned.distanceM / 1000).toFixed(1)} km`
+        + (Number.isFinite(planned.durationSec)
+            ? `, about ${Math.round(planned.durationSec / 60)} min.` : '.'));
+    } catch (error) {
+      setPlanError(error.message);
+      log('ERR', 'ROUTE_FAIL', `Could not plan the route: ${error.message}`);
+    } finally {
+      setPlanning(false);
+    }
+  };
+
+  /**
+   * Flip the position source between the corridor drive and this handset.
+   *
+   * Refuses rather than silently doing nothing when there is no route to
+   * drive: a toggle that appears to switch and then leaves the truck
+   * motionless is indistinguishable from a broken GNSS receiver, which is the
+   * exact diagnosis this screen exists to make possible.
+   */
+  const changeSource = (next) => {
+    if (next === isSimulated) return;
+    if (!tracker.current) {
+      setAlert('Tracking is still starting up.');
+      return;
+    }
+    if (tracker.current.setSimulated(next) === false) {
+      setAlert('Plan a route or pick a corridor first — there is nothing to drive.');
+      return;
+    }
+    setIsSimulated(next);
+    log('INFO', 'SOURCE', next
+      ? 'Position source: simulated corridor drive.'
+      : 'Position source: this handset\'s GNSS receiver.');
+  };
+
+  /**
+   * The driver takes the detour.
+   *
+   * The map switches FIRST and dispatch is told second, and that order is not
+   * an optimisation. The tap happens on a mountain road in front of a
+   * landslide, on a link that may not exist; making the new route wait on a
+   * round trip would leave the driver staring at the blocked road while a
+   * request times out. The acknowledgement is best-effort and idempotent, so
+   * a lost one costs a record, not a reroute.
+   */
+  const acceptReroute = async () => {
+    const offer = proposal;
+    if (!offer || answering) return;
+    setAnswering(true);
+    applyRoute(offer.coordinates, {
+      distanceM: offer.distanceM, durationSec: offer.durationSec, rerouted: true,
+    });
+    setProposal(null);
+    setAlert(`Rerouted — ${(offer.distanceM / 1000).toFixed(1)} km`);
+    log('INFO', 'REROUTE_ACCEPTED',
+      `Driver accepted the detour: ${(offer.distanceM / 1000).toFixed(1)} km.`);
+    try {
+      await speakAlert({ language: ALERT_LANG, text: 'Rerouting now.' });
+    } catch (error) {
+      console.warn('[tts]', error.message);
+    }
+    const ack = await ackReroute(API_URL, offer.rerouteId, true);
+    if (!ack.ok) {
+      log('WARN', 'ACK_FAIL', `Dispatch was not told the reroute was accepted: ${ack.error}`);
+    }
+    setAnswering(false);
+  };
+
+  /**
+   * The driver stays on the road they are on.
+   *
+   * This is a real answer, not a dismissal, and the server acts on it: the
+   * trip is put back on the superseded path so the dispatcher's board does
+   * not show this truck on a detour it refused.
+   */
+  const declineReroute = async () => {
+    const offer = proposal;
+    if (!offer || answering) return;
+    setAnswering(true);
+    setProposal(null);
+    log('WARN', 'REROUTE_DECLINED',
+      'Driver kept the current route — the hazard is still ahead of them.');
+    const ack = await ackReroute(API_URL, offer.rerouteId, false);
+    if (!ack.ok) {
+      log('WARN', 'ACK_FAIL', `Dispatch was not told the reroute was declined: ${ack.error}`);
+    }
+    setAnswering(false);
+  };
+
   /// Ask the model for hazards along a route and cache them. Never throws:
   /// a failed refresh leaves the previous warnings in place, because "no
   /// hazards" and "could not ask" must not look the same.
@@ -371,8 +621,18 @@ export default function App() {
 
       activeCorridor.current = corridor;
       setCorridorId(id);
-      setRoute(coordinates);
-      tracker.current?.setCorridor(coordinates, SIM_SPEED_KMH);
+      // A corridor is costed by the server, but /routes/corridors carries only
+      // its distance -- there is no stored ETA for it -- so the summary card
+      // is given the distance and left honest about the missing duration
+      // rather than shown a number this client invented.
+      applyRoute(coordinates, { distanceM: corridor.distance_m, rerouted: false });
+      setOrigin(asPlace(places, corridor.origin_name,
+        corridor.origin_lat, corridor.origin_lng));
+      setDestination(asPlace(places, corridor.destination_name,
+        corridor.destination_lat, corridor.destination_lng));
+      // A corridor change replaces the road; an offer against the road it
+      // replaced is no longer a question the driver can answer.
+      setProposal(null);
 
       try {
         await ensureTrip(API_URL, TRUCK_ID, corridor);
@@ -381,7 +641,6 @@ export default function App() {
       }
       log('INFO', 'CORRIDOR', `Now driving ${corridor.name} — `
         + `${(corridor.distance_m / 1000).toFixed(1)} km.`);
-      refreshHazards(coordinates);
     } catch (error) {
       log('ERR', 'CORRIDOR_FAIL', `Could not load corridor: ${error.message}`);
     } finally {
@@ -468,7 +727,12 @@ export default function App() {
       <View style={styles.body}>
         {tab === 'map' ? (
           <MapCanvas
-            fix={fix} route={route} hazards={hazards}
+            fix={fix} route={route}
+            // The offered detour, drawn dashed BESIDE the current route. The
+            // driver can see where it would take them before deciding, which
+            // is the point of asking rather than telling.
+            proposedRoute={proposal?.coordinates}
+            hazards={hazards}
             forecast={toFeatureCollection(forecast)}
             zoom={zoom} follow={follow} followKey={followKey}
             // A drag, pinch or rotate hands the viewport to the driver. The
@@ -503,25 +767,61 @@ export default function App() {
                 rerouted={routeEta?.rerouted}
                 style={styles.routeSummary}
               />
-              {SIM_DRIVE ? (
-                <CorridorPicker
-                  corridors={corridors}
-                  activeId={corridorId}
-                  busy={corridorBusy}
-                  onSelect={switchCorridor}
-                />
-              ) : null}
 
-              <View style={styles.statRow}>
-                <Card style={styles.statCard}>
-                  <Stat label="BEARING" unit="°"
-                        value={Number.isFinite(heading) ? pad3(heading) : '—'} />
-                </Card>
-                <Card style={[styles.statCard, styles.statCardRight]}>
-                  <Stat label="ALTITUDE" unit="m"
-                        value={Number.isFinite(altitude) ? Math.round(altitude) : '—'} />
-                </Card>
-              </View>
+              <RoutePlanner
+                places={places}
+                origin={origin}
+                destination={destination}
+                hasFix={Boolean(fix)}
+                open={plannerOpen}
+                onOpenChange={setPlannerOpen}
+                planning={planning}
+                error={planError}
+                onChange={(field, place) => {
+                  if (field === 'origin') setOrigin(place); else setDestination(place);
+                }}
+                onSwap={() => { setOrigin(destination); setDestination(origin); }}
+                onPlan={planRoute}
+                onClearError={() => setPlanError(null)}
+              />
+
+              <SourceToggle
+                simulated={isSimulated}
+                onChange={changeSource}
+                disabled={!route}
+                routeName={origin && destination
+                  ? `${origin.name} → ${destination.name}`
+                  : (activeCorridor.current?.name ?? null)}
+              />
+
+              {/* The corridor rail and the instrument cards step aside while
+                  the planner is open. Both stacks are useful and neither is
+                  urgent, and on a small handset all four at once pushes the
+                  hazard button off the bottom of the screen -- which is the
+                  one control that must never be unreachable. */}
+              {!plannerOpen ? (
+                <>
+                  {isSimulated ? (
+                    <CorridorPicker
+                      corridors={corridors}
+                      activeId={corridorId}
+                      busy={corridorBusy}
+                      onSelect={switchCorridor}
+                    />
+                  ) : null}
+
+                  <View style={styles.statRow}>
+                    <Card style={styles.statCard}>
+                      <Stat label="BEARING" unit="°"
+                            value={Number.isFinite(heading) ? pad3(heading) : '—'} />
+                    </Card>
+                    <Card style={[styles.statCard, styles.statCardRight]}>
+                      <Stat label="ALTITUDE" unit="m"
+                            value={Number.isFinite(altitude) ? Math.round(altitude) : '—'} />
+                    </Card>
+                  </View>
+                </>
+              ) : null}
 
               <Button
                 label="Report Hazard"
@@ -574,16 +874,35 @@ export default function App() {
         onDismiss={() => setIncident(null)}
         onViewMap={() => { setIncident(null); setTab('map'); }}
       />
+
+      {/* Last in the tree, so the offer sits over the tab bar as well as the
+          map. A driver deciding whether to take a detour should not be able to
+          navigate away from the question by accident. */}
+      <RerouteSheet
+        proposal={proposal}
+        busy={answering}
+        onAccept={acceptReroute}
+        onKeep={declineReroute}
+      />
     </SafeAreaView>
   );
 }
 
-/// Normalise whatever the backend sent into [[lng, lat], ...], or null.
-function routeCoordinates(geometry) {
-  if (Array.isArray(geometry) && geometry.length >= 2) return geometry;
-  const coords = geometry?.coordinates;
-  if (Array.isArray(coords) && coords.length >= 2) return coords;
-  return null;
+/**
+ * A corridor endpoint as a place the planner can hold.
+ *
+ * Matched to the server's own list by name where possible, so the id in the
+ * field is the id the picker will tick. Synthesised only when the list could
+ * not be fetched -- the corridor already carries the coordinates, and a
+ * planner that sat empty because a 3 KB request failed would be a worse
+ * failure than a locally-derived id.
+ */
+function asPlace(places, name, lat, lng) {
+  if (!name) return null;
+  const known = (places ?? []).find((p) => p.name === name);
+  if (known) return known;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), name, lat, lng };
 }
 
 /// What the driver hears. Short and imperative: it is spoken aloud at speed.

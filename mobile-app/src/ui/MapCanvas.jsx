@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, AccessibilityInfo } from 'react-native';
 import * as MapLibreRN from '@maplibre/maplibre-react-native';
 import RNFS from 'react-native-fs';
+import VehicleMarker from './VehicleMarker';
 import { t } from './tokens';
 
 // Two stacked rasters. Bhuvan is drawn ON TOP of OSM because later layers win
@@ -130,7 +131,8 @@ function isNight(now = new Date()) {
 const CACHE_HALF_SPAN = 0.1;
 
 export default function MapCanvas({
-  fix, route, hazards, forecast, zoom, follow, followKey, onUserPan, children,
+  fix, route, proposedRoute, hazards, forecast, zoom, follow, followKey,
+  onUserPan, children,
 }) {
   const [cacheState, setCacheState] = useState('idle');
   const [night, setNight] = useState(() => isNight());
@@ -323,6 +325,15 @@ export default function MapCanvas({
     ? { type: 'Feature', geometry: { type: 'LineString', coordinates: route } }
     : null;
 
+  // The detour the driver has been OFFERED but has not accepted. Drawn beside
+  // the current route, never instead of it: replacing the line at the moment
+  // the payload arrives is exactly the behaviour the accept step exists to
+  // prevent, and a driver watching the road they are on disappear from the map
+  // has no way to tell a proposal from an instruction.
+  const proposedLine = proposedRoute && proposedRoute.length >= 2
+    ? { type: 'Feature', geometry: { type: 'LineString', coordinates: proposedRoute } }
+    : null;
+
   return (
     <View style={styles.fill}>
       <MapLibreRN.MapView
@@ -359,6 +370,27 @@ export default function MapCanvas({
           defaultSettings={{ centerCoordinate: centre, zoomLevel: fix ? 14 : 4 }}
           followUserLocation={false}
         />
+
+        {/* Drawn FIRST so the route the truck is actually on paints over it
+            wherever the two share a road. The proposal is the alternative,
+            not the plan. */}
+        {proposedLine ? (
+          <MapLibreRN.ShapeSource id="proposed-route" shape={proposedLine}>
+            <MapLibreRN.LineLayer
+              id="proposed-route-line"
+              style={{
+                // Dashed and desaturated: every navigator draws the road you
+                // are not on this way, so it needs no legend.
+                lineColor: t.color.textMuted,
+                lineWidth: 6,
+                lineCap: 'round',
+                lineJoin: 'round',
+                lineOpacity: 0.75,
+                lineDasharray: [1.6, 1.2],
+              }}
+            />
+          </MapLibreRN.ShapeSource>
+        ) : null}
 
         {routeLine ? (
           <MapLibreRN.ShapeSource id="route" shape={routeLine}>
@@ -429,7 +461,13 @@ export default function MapCanvas({
 
         {/* The truck itself, wherever the position came from. A dead-reckoned
             fix is drawn in the dead-reckoning colour so the driver can see at
-            a glance that it is an estimate, not a satellite fix. */}
+            a glance that it is an estimate, not a satellite fix.
+
+            Two layers for one truck, deliberately. This halo is pure GL and
+            paints on any device; the directional vehicle puck below it is a
+            native view. If the puck ever fails to mount the driver loses the
+            heading and still sees the truck, which is the right way round for
+            the one element they navigate by. */}
         {fix ? (
           <MapLibreRN.ShapeSource
             id="truck"
@@ -441,7 +479,9 @@ export default function MapCanvas({
             <MapLibreRN.CircleLayer
               id="truck-dot"
               style={{
-                circleRadius: 10,
+                // Sized to sit just outside the 30 pt puck rather than under
+                // it, so it reads as the accuracy glow around the vehicle.
+                circleRadius: 19,
                 // GNSS blue / dead-reckoning amber -- the same two colours the
                 // dispatcher's map uses for the same two things. A driver and
                 // a dispatcher discussing one truck must not be looking at
@@ -450,12 +490,14 @@ export default function MapCanvas({
                 circleColor: fix.source === 'ekf'
                   ? t.color.sourceDeadReckoning
                   : t.color.sourceGnss,
-                circleStrokeWidth: 3,
-                circleStrokeColor: '#FFFFFF',
+                circleOpacity: 0.22,
+                circleBlur: 0.35,
               }}
             />
           </MapLibreRN.ShapeSource>
         ) : null}
+
+        <VehicleMarker fix={fix} />
 
         {(hazards ?? []).map((h) => (
           <MapLibreRN.ShapeSource

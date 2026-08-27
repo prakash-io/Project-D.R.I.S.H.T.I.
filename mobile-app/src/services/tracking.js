@@ -24,6 +24,13 @@ export class Tracker {
     // a truck driving a real pgr_astar corridor; everything downstream of the
     // fix is untouched. See simulatedDrive.js for why this exists.
     this.simulate = simulate ?? null;
+    // The route and the SWITCH are two different things, and they used to be
+    // one. Holding the corridor in `simulate` and reading its presence as
+    // "simulate now" meant the driver could not turn the demonstration off
+    // without losing the route, and could not turn it on without a corridor
+    // already loaded. The toggle needs to flip the source with the route left
+    // exactly where it is, so the flag is separate from the geometry.
+    this.simulationEnabled = Boolean(simulate);
     this.drive = null;
 
     this.mode = 'idle';
@@ -84,7 +91,7 @@ export class Tracker {
         this.onFix?.({ ...this.lastFix, source: 'gps' });
     };
 
-    if (this.simulate?.coordinates?.length >= 2) {
+    if (this.simulationEnabled && this.simulate?.coordinates?.length >= 2) {
       this.drive = new SimulatedDrive({
         coordinates: this.simulate.coordinates,
         speedKmh: this.simulate.speedKmh ?? 60,
@@ -219,9 +226,45 @@ export class Tracker {
       coordinates,
       speedKmh: speedKmh ?? this.simulate?.speedKmh ?? 60,
     };
-    if (this.mode !== 'online') return true;
+    // Stored but not started while the driver is on real GNSS: they may be
+    // planning the route they intend to demonstrate later, and switching them
+    // onto a simulated drive because they picked a destination would replace
+    // their actual position without being asked.
+    if (this.mode !== 'online' || !this.simulationEnabled) return true;
     // Restart through startOnline so there is one construction path for the
     // drive rather than two that can drift apart.
+    this.stopOnline();
+    this.mode = 'idle';
+    this.startOnline();
+    return true;
+  }
+
+  /**
+   * Switch the position source between the handset's GNSS and the simulated
+   * corridor drive, mid-session (the demonstration toggle).
+   *
+   * Everything downstream of the fix is untouched by this: the same onPosition
+   * handler, the same socket emit, the same WatermelonDB queue, the same
+   * backend ingest. That is the whole contract of the simulated drive -- it
+   * substitutes the SENSOR, never the system -- and it is why the toggle can
+   * be a runtime switch at all rather than a build flag.
+   *
+   * Returns false when simulation was asked for and there is no corridor to
+   * drive. The caller has to be able to tell that apart from a successful
+   * switch, because the truck would otherwise silently stop moving.
+   */
+  setSimulated(enabled) {
+    const wanted = Boolean(enabled);
+    if (wanted === this.simulationEnabled) return true;
+    if (wanted && !(this.simulate?.coordinates?.length >= 2)) return false;
+    this.simulationEnabled = wanted;
+
+    // Dead reckoning is fed by the IMU, not by either position source, so a
+    // switch during a blackout has nothing to restart -- and tearing the
+    // engine down mid-blackout would lose the EKF's accumulated state and the
+    // only position estimate the driver has.
+    if (this.mode !== 'online') return true;
+
     this.stopOnline();
     this.mode = 'idle';
     this.startOnline();
