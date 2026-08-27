@@ -131,11 +131,17 @@ reason, and each becomes real work once there is a handset and a cloud.
   injects the speed measurement at the model's own held-out error (RMSE
   5.259 m/s). The EKF and the R*Tree map matching are exercised for real; the
   speed model is not. First run on a handset is its first run anywhere.
-* **Open Q8: the vision model is out of distribution on its real input.**
-  Trained on satellite and aerial imagery, served ground-level driver photos.
-  Dispatcher approval makes this safe, not correct. Closing it needs a few
-  hundred ground-level NER road photos per class, including a genuine
-  "nothing wrong here" class. Blocks autonomous verification, not the demo.
+* **Open Q8: the vision model is out of distribution on its real HAZARD
+  input.** Half of this is now closed. The "nothing wrong here" class exists
+  and is real: 1,467 ordinary ground-level photographs, content-derived, so a
+  random photo no longer has to be a flood or a landslide. What is NOT closed
+  is the other half -- both HAZARD classes are still satellite and aerial
+  imagery, so a driver's ground-level photo of a genuine landslide remains out
+  of distribution. Being able to say "nothing here" is a different capability
+  from recognising something that is. Closing the rest needs a few hundred
+  ground-level NER photos *per hazard class*; drop them into
+  `data/raw/vision/` and retrain, no code change. Still blocks autonomous
+  verification, which is why `INCIDENT_REQUIRE_REVIEW` stays on.
 * **Hazard labels are synthetic.** Demonstrator only. The depth-2 baseline
   prints on every training run so the headline accuracy is never mistaken for
   forecasting skill.
@@ -163,9 +169,17 @@ will reintroduce a bug that has already been found and fixed once.
    Only lat/lon are raw. Re-scaling desyncs training from serving silently.
 3. **torch and xgboost cannot share a macOS process** (three OpenMP runtimes).
    Vision runs in a spawned worker; the parent never imports torch.
-4. **Vision model is 2-class.** NORMAL_TERRAIN and DAMAGED_BRIDGE labels are
-   filename index arithmetic, verified 1380/1380. `requires_human_review` is
-   always true.
+4. **Vision model is 3-class**: the two hazards plus a real NORMAL_TERRAIN.
+   With only the two hazards the softmax summed to 1 over them, so top-1 was
+   >= 0.5 by construction and every image on earth was a flood or a landslide
+   -- a photo of a footballer scored ACTIVE_LANDSLIDE_DEBRIS at 1.000. That
+   was a missing class, not a threshold to tune; no cutoff separates it
+   (held-out normal terrain scored 0.794 median against 0.786 for real
+   landslides). NORMAL_TERRAIN is sourced separately by
+   `scripts/fetch_normal_terrain.py`, NOT from the dataset's shipped label of
+   that name, which is filename arithmetic. DAMAGED_BRIDGE stays out: still
+   arithmetic, verified 1380/1380. `requires_human_review` is still always
+   true -- see Q8 for the half that is not fixed.
 5. **Only `verified` blocks an edge.** Reports land in
    `pending_dispatcher_approval`; `AUTO_BLOCK_ON_AI_VERDICT=0` must stay 0.
 6. **The 999999 blocked cost lives in the `routable_edges` view.** Never

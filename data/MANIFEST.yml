@@ -214,6 +214,47 @@ datasets:
       photo scoring class 0 means the report is unverified and must NOT
       block an edge.
 
+      Both pools here are HAZARDS. There are no negatives in this dataset at
+      all -- its own NORMAL_TERRAIN label is filename arithmetic, verified
+      noise on 1380/1380. The trainable negative class lives in
+      `vision_normal_terrain` below.
+
+  - id: vision_normal_terrain
+    path: data/raw/vision/normal_terrain
+    format: image_folder
+    layout: "flat; normal_scene_*.jpg (keyword-matched) + normal_*.jpg (arbitrary)"
+    images: {total: 1467, scene: 865, arbitrary: 602}
+    consumed_by: [ML-05]
+    required: false
+    source: >
+      Fetched by scripts/fetch_normal_terrain.py, not from CLEAN_READY_DATA.
+      60% keyword-matched ground-level scenes (road, highway, dashboard,
+      truck, bridge, selfie, village); 40% arbitrary photographs. Deduplicated
+      by SHA-256 of the bytes.
+    image_size: [480, 292]
+    classes: {0: NORMAL_TERRAIN}
+    notes: >
+      The class that makes /verify-incident able to refuse. Without it the
+      model had two classes whose softmax sums to 1, so top-1 was >= 0.5 by
+      construction and every photograph on earth was a flood or a landslide
+      -- a picture of a footballer scored ACTIVE_LANDSLIDE_DEBRIS at 1.000.
+      That was a missing class, not a threshold: held-out normal terrain
+      scored median 0.794 against 0.786 for real landslides, distributions no
+      cutoff separates.
+
+      Keyword-sourced images are cropped 34 px top and bottom to remove the
+      attribution stamp burned into their corners. Without that crop the
+      classifier can separate the classes by spotting a watermark and learn
+      nothing about roads -- which would read as a superb test score on a
+      useless model.
+
+      NOT a substitute for real NER road photographs. These are ordinary
+      ground-level images, so the model can now decline to see a hazard that
+      is absent; the two HAZARD classes are still satellite and aerial, so it
+      still cannot be trusted to recognise one that is present. Drop real
+      ground-level NER photos into this directory (or a sibling per hazard)
+      and retrain -- train_incident_yolo.py reads whatever is there.
+
       Class order in data.yaml is load-bearing — YOLO emits indices and the
       backend maps index -> incident kind. Reordering silently relabels every
       past incident.
@@ -578,16 +619,26 @@ datasets:
     format: pytorch_ultralytics
     consumed_by: [ML-05, ML-06]
     required: true
-    trained_on: 2026-08-25
-    source: scripts/train_incident_yolo.py, trained on vision_hazard_yolo
+    trained_on: 2026-08-27
+    source: >
+      scripts/train_incident_yolo.py, trained on vision_hazard_yolo +
+      vision_normal_terrain
     trained_by: scripts/train_incident_yolo.py
     architecture: yolov8n-cls, 1.44M params, imgsz 224, 40 epochs, 3.0 MB
-    classes: [FLOODED_ROAD_OR_SUBMERGED, ACTIVE_LANDSLIDE_DEBRIS]
+    classes: [FLOODED_ROAD_OR_SUBMERGED, ACTIVE_LANDSLIDE_DEBRIS, NORMAL_TERRAIN]
     label_source: pool
     accuracy:
-      test_top1: 1.000
-      recall_FLOODED_ROAD_OR_SUBMERGED: 1.000
+      test_top1: 0.990
+      recall_FLOODED_ROAD_OR_SUBMERGED: 0.967
       recall_ACTIVE_LANDSLIDE_DEBRIS: 1.000
+      recall_NORMAL_TERRAIN: 0.995
+    accuracy_note: >
+      Lower than the 1.000 the two-class model scored, and better. That model
+      could not be wrong about a negative because it had no negative to be
+      wrong about. The 3 floods now called NORMAL_TERRAIN are the number to
+      watch: a missed hazard produces no reroute, which is the failure
+      direction that matters. INCIDENT_REQUIRE_REVIEW keeps a dispatcher in
+      the loop either way.
     notes: >
       CLASSIFICATION, not detection, though the source ships in detection
       format. Every one of the 1380 images carries exactly one box, so the

@@ -319,7 +319,11 @@ def test_every_class_the_model_emits_has_a_kind_mapping():
 
 
 def test_current_model_does_not_emit_the_arithmetic_classes(client):
-    """The 2-class model must not offer classes whose labels were noise."""
+    """The model must not offer a class whose labels were noise.
+
+    DAMAGED_BRIDGE_INFRASTRUCTURE only; NORMAL_TERRAIN is a real class now and
+    is asserted present rather than absent.
+    """
     if not config.YOLO_WEIGHTS.exists():
         pytest.skip("YOLO weights not trained yet")
 
@@ -334,9 +338,45 @@ def test_current_model_does_not_emit_the_arithmetic_classes(client):
     ).json()
 
     emitted = set(body["class_probabilities"])
-    assert "NORMAL_TERRAIN" not in emitted
     assert "DAMAGED_BRIDGE_INFRASTRUCTURE" not in emitted
+    assert "NORMAL_TERRAIN" in emitted
     assert emitted == set(config.YOLO_CLASSES)
+
+
+def test_an_unrelated_photo_is_not_a_hazard(client):
+    """THE regression test for the reported bug.
+
+    "Even if I upload a random photo, it classifies it as a flood." The image
+    used here ships with ultralytics -- a photograph of footballers, from a
+    source entirely disjoint from both the hazard pools and the negative pool,
+    so it is held out by construction and cannot have been trained on.
+
+    Before the negative class existed this returned ACTIVE_LANDSLIDE_DEBRIS at
+    1.000 confidence, and the backend snapped it to a road edge ready for a
+    dispatcher to block. What must hold now is not merely that the verdict is
+    unverified -- a confidence threshold could have done that -- but that the
+    model NAMES it as normal terrain.
+    """
+    if not config.YOLO_WEIGHTS.exists():
+        pytest.skip("YOLO weights not trained yet")
+
+    import ultralytics
+    asset = Path(ultralytics.__file__).parent / "assets" / "zidane.jpg"
+    if not asset.exists():
+        pytest.skip("ultralytics sample asset not present")
+
+    body = client.post(
+        "/verify-incident",
+        files={"file": (asset.name, asset.read_bytes(), "image/jpeg")},
+    ).json()
+
+    assert body["predicted_class"] == "NORMAL_TERRAIN", (
+        f"a photograph of footballers came back as {body['predicted_class']} "
+        f"at {body['confidence']:.3f} -- the negative class is not doing its job"
+    )
+    # The two that actually protect the road graph.
+    assert body["verified"] is False
+    assert body["incident_kind"] is None
 
 
 def test_a_verified_incident_demands_human_review(client):

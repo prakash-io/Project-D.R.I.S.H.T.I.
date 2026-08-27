@@ -91,15 +91,27 @@ YOLO_DATASET = _path("YOLO_DATASET", "data/raw/vision/incident-yolo")
 #: dropped to 2 classes (top-1 >= 0.5 always). Validated at startup.
 YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.75"))
 
-#: Classes the CURRENT model emits. Two, not the dataset's four: the other
-#: two shipped labels (NORMAL_TERRAIN, DAMAGED_BRIDGE_INFRASTRUCTURE) are
-#: assigned by filename index arithmetic rather than image content, verified
-#: on 1380/1380 labels, so a model trained to emit them emits noise. See
-#: scripts/train_incident_yolo.py --label-source.
+#: Classes the CURRENT model emits. Three, not the dataset's four.
+#:
+#: NORMAL_TERRAIN is real now, and it is the class that makes the endpoint
+#: safe. It is NOT the dataset's shipped NORMAL_TERRAIN label -- that one is
+#: filename index arithmetic, verified noise on 1380/1380 labels. This one is
+#: a separately sourced pool of ordinary ground-level photographs (see
+#: scripts/fetch_normal_terrain.py), so the label means what it says.
+#:
+#: Why it had to exist: with two hazard classes the softmax sums to 1 and the
+#: model has no way to answer "neither". Every upload was forced to be a flood
+#: or a landslide, and a photograph of a footballer scored
+#: ACTIVE_LANDSLIDE_DEBRIS at 1.000. That is a missing class, not a threshold
+#: that needs tuning.
+#:
+#: DAMAGED_BRIDGE_INFRASTRUCTURE stays out: its labels are still arithmetic.
+#: It remains in YOLO_CLASS_TO_INCIDENT_KIND so an older 4-class checkpoint
+#: still maps rather than raising.
 YOLO_CLASSES = [
     c.strip() for c in os.getenv(
         "YOLO_CLASSES",
-        "FLOODED_ROAD_OR_SUBMERGED,ACTIVE_LANDSLIDE_DEBRIS",
+        "FLOODED_ROAD_OR_SUBMERGED,ACTIVE_LANDSLIDE_DEBRIS,NORMAL_TERRAIN",
     ).split(",") if c.strip()
 ]
 
@@ -123,17 +135,24 @@ YOLO_CLASS_TO_INCIDENT_KIND: dict[str, str | None] = {
 
 #: Require a dispatcher to confirm before a verdict may block a road edge.
 #:
-#: ON by default, and it should stay on until the training data changes. Two
-#: independent reasons, both measured:
+#: ON by default. There were two independent reasons, both measured. One is
+#: now closed and one is not, so the gate stays.
 #:
-#:   1. The model has no "no incident" class. The shipped NORMAL_TERRAIN
-#:      labels are index arithmetic, so it cannot be trained, and the
-#:      confidence threshold cannot stand in for it -- held-out
-#:      normal-terrain images came back as landslides at median confidence
-#:      0.794 against 0.786 for real ones.
-#:   2. The training images are aerial and satellite; `/verify-incident`
-#:      receives ground-level photographs from a driver's phone. Every real
-#:      input is out of distribution.
+#:   1. CLOSED. The model had no "no incident" class, and the confidence
+#:      threshold could not stand in for one -- held-out normal terrain came
+#:      back as landslide at median confidence 0.794 against 0.786 for real
+#:      landslides, distributions that no cutoff separates. NORMAL_TERRAIN is
+#:      now a trained, content-derived class.
+#:   2. STANDS. The hazard training images are aerial and satellite, while
+#:      `/verify-incident` receives ground-level photographs from a driver's
+#:      phone. The negative class is ground-level, but the two hazard classes
+#:      are not, so a driver's photo of a REAL landslide is still out of
+#:      distribution. Closing this needs ground-level NER hazard photographs,
+#:      not more negatives. See REVISION.md Q8.
+#:
+#: So the model can now decline to see a hazard that is not there, which is
+#: what reason 1 was about. It still cannot be trusted to recognise one that
+#: is. Those are different claims, and only the first has been fixed.
 #:
 #: WEB-05 already specifies a dispatcher incident-review panel, so honouring
 #: this costs no new UI.
