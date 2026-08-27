@@ -203,6 +203,15 @@ async function main() {
     assert.ok(Number.isFinite(p.delta_time_sec), 'no delta_time_sec');
     assert.ok(p.incident && 'kind' in p.incident,
       'proposal carries no incident -- the alert cannot name the hazard');
+    // The join key. `route_updated` is the ONLY event carrying what a detour
+    // costs, and `incident_reported` is the only one that opens the driver's
+    // hazard card, so the handset has to match them up by this id -- see the
+    // rerouteCost map in App.jsx. Without it the card cannot quote a delay or
+    // an extra distance for the hazard it is describing, which is exactly the
+    // state that shipped: both tiles showed an em-dash on every alert.
+    assert.equal(p.incident.id, first.incidentId,
+      'proposal does not name the incident that caused it -- the driver\'s '
+      + 'alert cannot be joined to its detour figures');
     // The comparison has to be arithmetic the client can trust, because both
     // the handset and the dashboard render it and they must not disagree.
     assert.ok(Math.abs((p.previous_distance_m + p.delta_distance_m) - p.new_distance_m) < 1,

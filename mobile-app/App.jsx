@@ -77,6 +77,16 @@ export default function App() {
   const [hazardQueued, setHazardQueued] = useState(0);
   const [alert, setAlert] = useState(null);
   const [incident, setIncident] = useState(null);
+  /// What each hazard actually costs this truck, keyed by incident id.
+  ///
+  /// The alert modal quotes an extra distance and a delay, and those two
+  /// numbers are NOT on `incident_reported` -- that event is the incidents row
+  /// itself, which has no idea what any particular truck's detour looks like.
+  /// They arrive on `route_updated`, and on the approval path the backend
+  /// reroutes BEFORE it broadcasts the incident, so by the time the modal
+  /// opens the figures have already gone past. Held in a ref so a late
+  /// reroute, or an early one, both end up on the card.
+  const rerouteCost = useRef(new Map());
   const [spokenBy, setSpokenBy] = useState(null);
   const [hazards, setHazards] = useState([]);
   const [route, setRoute] = useState(null);
@@ -196,7 +206,12 @@ export default function App() {
 
         onIncident: async (payload) => {
           if (disposed) return;
-          setIncident(payload);
+          // Attach the detour figures if this hazard has already been costed
+          // for us. `costed` distinguishes "no detour exists" from "the detour
+          // is still being calculated", which the card has to say differently:
+          // a driver seeing a blank delay must know whether the answer is
+          // zero or not yet.
+          setIncident({ ...payload, ...(rerouteCost.current.get(payload?.id) ?? {}) });
           setSpokenBy(null);
           log('WARN', 'HAZARD_RX', `Dispatch reported ${payload?.kind ?? 'a hazard'} ahead.`);
           if (Number.isFinite(payload?.lat) && Number.isFinite(payload?.lng)) {
@@ -222,6 +237,21 @@ export default function App() {
           // not been redeployed yet still drives the banner.
           const distanceM = payload?.new_distance_m ?? payload?.distance_m;
           const durationSec = payload?.estimated_time_sec;
+
+          // Remember what this detour costs, against the hazard that caused
+          // it, so the alert card can quote it whichever event lands first.
+          const causedBy = payload?.incident?.id ?? payload?.incident_id;
+          if (causedBy) {
+            const cost = {
+              costed: true,
+              extra_distance_m: payload?.delta_distance_m ?? null,
+              delay_sec: payload?.delta_time_sec ?? null,
+            };
+            rerouteCost.current.set(causedBy, cost);
+            // If the card for this hazard is already open, fill it in place
+            // rather than waiting for the driver to dismiss and re-open it.
+            setIncident((shown) => (shown?.id === causedBy ? { ...shown, ...cost } : shown));
+          }
           // The backend sends a GeoJSON LineString object, not a bare
           // coordinate array -- src/services/routing.js returns
           // `{ type: 'LineString', coordinates }` and incidents.js forwards it

@@ -388,3 +388,127 @@ Two bugs found by verification and fixed, neither visible by reading:
    road name, and the extract has hundreds of edges sharing one name (two
    entries in the top 14 are both "de a2 panenkoek"). Now keyed on edge id,
    which also fixes hover highlighting every segment of the same road at once.
+
+---
+
+# Task 5 — Field defects from the first handset run
+
+Reported 2026-08-28 from a real APK on a phone: a hazard reported in the app
+never appeared on the dashboard and was "not classified", and the driver's
+alert card showed an em-dash for both **estimated delay** and **extra
+distance**. Two unrelated causes; both found in the database and on the wire,
+not by reading.
+
+Status: **complete — verified 2026-08-28**
+
+- [x] **5.1** A driver's report must always reach a human
+- [x] **5.2** The report must reach the board without a page reload
+- [x] **5.3** The driver's own classification must survive the model disagreeing
+- [x] **5.4** The alert card must quote the real detour cost
+
+## 5.1 / 5.2 / 5.3 — the report that vanished
+
+The report was never lost. It was in `incidents` the whole time:
+
+    id         a87b82da-022d-47e9-8e74-43aa149f2c3d
+    reported   2026-08-27 20:34:17Z
+    status     rejected
+    ai_class   NORMAL_TERRAIN
+    confidence 0.9999999
+    photo      stored
+
+So the model *did* run and *did* classify it — as "nothing wrong here", at
+essentially total confidence. Three things then combined:
+
+1. `POST /incidents/report` wrote `status = 'rejected'` whenever the model did
+   not confirm a hazard.
+2. The dispatcher queue (`useIncidents.js`) asks for
+   `status = 'pending_dispatcher_approval'` and nothing else, so a `rejected`
+   row is invisible on the board.
+3. The handset read 201, treated it as success, and deleted its only copy of
+   the photograph.
+
+The result is the vision model unilaterally overruling the one participant who
+was physically standing on the road — which is precisely what
+`INCIDENT_REQUIRE_REVIEW` and `AUTO_BLOCK_ON_AI_VERDICT=0` exist to prevent.
+The guardrails were only ever applied in the direction of *blocking* a road,
+never in the direction of *dismissing* a report.
+
+It is also the expected case rather than a rare one. Both hazard classes were
+trained on satellite and aerial imagery (CLAUDE.md open Q8), so a ground-level
+phone photo is out of distribution and a confident `NORMAL_TERRAIN` is the
+predictable wrong answer for a genuine landslide.
+
+**Fix.** The model now triages; it does not discard.
+
+* Every report lands in `pending_dispatcher_approval`, whether the model
+  agreed, disagreed, or never ran. `rejected` is now reserved for a verdict a
+  human actually reached.
+* The AI-unreachable path (202) also broadcasts `incident_reported` — it
+  previously stored the row silently, so the board only learned of it on the
+  next page reload.
+* `GET /incidents` computes `model_agrees` (true / false / **null** when the
+  service never ran — three states, because "it said no" and "it never looked"
+  call for opposite amounts of scepticism).
+* `IncidentPanel` renders that as a coloured stance line, and adds a "Driver
+  reported" row. Disagreement is the loudest of the three.
+* `drainHazards` now sends the `kind` the driver picked. `queueHazard` had
+  been storing it since the beginning and the upload never included it, so
+  every report reached the backend anonymous and came back as the generic
+  `obstruction` fallback.
+
+Nothing here can close a road: `routable_edges` still keys its 999999 off
+`verified` alone, and only the approve endpoint writes it.
+
+## 5.4 — the em-dash on the alert card
+
+`IncidentModal` read `incident.distance_m` and `incident.delay_min`. **No
+service has ever sent either field.** The card is fed by `incident_reported`,
+whose payload is the incidents ROW — kind, status, confidence, lat, lng. A row
+cannot know what a detour costs one particular truck, because nothing about a
+detour is stored on it. Both tiles therefore showed `—` on every hazard the
+platform has ever raised, which reads as "no delay" rather than "never wired".
+
+The real figures are `delta_distance_m` and `delta_time_sec`, and they travel
+on `route_updated`. On the approval path the backend reroutes *before* it
+broadcasts the incident, so the numbers go past **before** the card opens.
+
+**Fix.** `App.jsx` keeps a `rerouteCost` map keyed by incident id, filled from
+`route_updated` and read when the card opens; a reroute arriving while the card
+is already open updates it in place. The card now distinguishes three states —
+a real signed figure, a genuine zero, and `COSTING…` for not-yet-routed — because
+a blank where a delay belongs tells the driver a detour is free.
+
+Signed, because `pgr_astar` sometimes returns a *shorter* path than the one the
+truck was on; the reference corridor's dual-carriageway block costs +0.0 km, and
+printing that unsigned would be a lie in the other direction.
+
+## Verification
+
+    backend  $ node test/incident_visibility_verify.mjs   # NEW — 4 groups, 10 checks
+    backend  $ node test/reroute_proposal_verify.mjs      # 8 groups
+    backend  $ node test/e2e_verify.mjs                   # 6 groups
+    mobile   $ npm run verify                             # 50 parsed, hardening, 14 IMU
+    dashboard$ npm run check                              # build + three.js isolation
+
+`incident_visibility_verify.mjs` is new and is the regression guard for 5.1–5.3.
+It feeds the model an ordinary ground-level photograph — deliberately *not* a
+satellite landslide tile, because the happy path was never what broke — and
+asserts the safety property rather than the model's accuracy: whatever the model
+says, the report reaches the queue, carries the model's dissent, and no road
+closes without a person. It cleans up the incident it creates.
+
+Before the fix it failed 4 of its checks with
+`model said NORMAL_TERRAIN @ 98.0% -> status 'rejected'`; after, all pass.
+
+`reroute_proposal_verify.mjs` gained one assertion: the proposal must name the
+incident that caused it. That id is the join key 5.4 depends on, and it was
+never pinned.
+
+Two verifications were run against a **second** backend on `:4100` and a second
+Vite on `:5174`, because the user's own stack owns `:4000`/`:5173`. Dashboard
+verify was run four times: the incident-review block passed in three, and the
+one miss is the documented approve-latency flake from commit 06b7755 — its own
+cleanup phase swept the incident it had just approved, proving the POST landed
+after the harness stopped watching. The `basemap tiles` check also failed once
+and returned 28 tiles on the next run; it is an external tile server.
