@@ -11,6 +11,7 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import RNFS from 'react-native-fs';
 
 import MapCanvas from './src/ui/MapCanvas';
+import ErrorBoundary from './src/ui/ErrorBoundary';
 import MapControls from './src/ui/MapControls';
 import CorridorPicker from './src/ui/CorridorPicker';
 import SpeedCard from './src/ui/SpeedCard';
@@ -725,7 +726,16 @@ export default function App() {
       </View>
 
       <View style={styles.body}>
+        {/* The map is a native MapLibre surface, and this app has never been
+            rendered on a handset -- so it is the single most likely thing here
+            to fail on the first APK. Boundaried so that a map that will not
+            mount costs the driver the map and nothing else: the tab bar still
+            works, the HUD still shows speed and heading from the same fix, the
+            hazard report still queues, and tracking never stopped. Without
+            this, one native view failing blanks the entire app in exactly the
+            place it is needed most. */}
         {tab === 'map' ? (
+          <ErrorBoundary label="Map">
           <MapCanvas
             fix={fix} route={route}
             // The offered detour, drawn dashed BESIDE the current route. The
@@ -832,6 +842,7 @@ export default function App() {
               />
             </View>
           </MapCanvas>
+          </ErrorBoundary>
         ) : null}
 
         {tab === 'hud' ? (

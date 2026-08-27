@@ -257,20 +257,73 @@ Starting state: the RN app has never been built or rendered. **No `ErrorBoundary
 exists anywhere in `mobile-app/`.** `VehicleMarker.jsx` uses the native
 `MapLibreRN.MarkerView` bridge, which is the most likely first-APK failure point.
 
-- [ ] 4.1 Audit UI components, especially the `MarkerView` native module
-- [ ] 4.2 Error Boundaries around the map and marker components
-- [ ] 4.3 Fallback generic marker (plain circle) if `MarkerView` fails to bridge
-- [ ] 4.4 Confirm universally supported fonts, with fallbacks
+- [x] 4.1 Audit UI components, especially the `MarkerView` native module
+- [x] 4.2 Error Boundaries around the map and marker components
+- [x] 4.3 Fallback generic marker (plain circle) if `MarkerView` fails to bridge
+- [x] 4.4 Confirm universally supported fonts, with fallbacks
 
-Verify: `node mobile-app/verify_parse.mjs`
+Verify: `cd mobile-app && npm run verify` (now includes `verify_hardening.mjs`)
 
-Status: **pending**
+Status: **complete — verified 2026-08-28**
+
+The audit found the fonts were already safe and the boundaries did not exist
+at all. `src/ui/tokens.js` names only platform-guaranteed families — iOS
+`System`/`Menlo`, Android `sans-serif`/`sans-serif-medium`/`monospace`, which
+are framework aliases rather than font files that have to be bundled — and no
+component names a family directly. `fontVariant: ['tabular-nums']` appears in
+ten components and is supported on Android from React Native 0.73; this project
+is on 0.76.5, so it applies rather than being silently ignored.
+
+There was **no `ErrorBoundary` anywhere in `mobile-app/`**. React unmounts the
+whole tree when any component throws during render, so a `MarkerView` that
+failed to bridge on some OEM's Android build would have blanked the driver's
+entire screen — in a valley, with no signal. Two tight boundaries now:
+`MapCanvas` in `App.jsx`, and `VehicleMarker` inside `MapCanvas`.
+
+The marker's fallback is `VehicleMarkerFallback`: a solid `CircleLayer` drawn
+by MapLibre's own renderer, crossing no bridge. Deliberately not the existing
+accuracy halo, which is 0.22 alpha and blurred because it sits *behind* a solid
+puck — alone it reads as a smudge, not a vehicle. `VehicleMarker` also checks
+`MapLibreRN.MarkerView` exists before rendering it, so a library version that
+drops or renames it degrades to the dot instead of throwing.
+
+`verify_hardening.mjs` asserts all of this from source, and is now part of
+`npm run verify`. It cannot prove the map renders — only a handset can — but it
+proves that when something doesn't, the rest of the app survives.
 
 ---
 
 ## Verification log
 
 Appended as each task closes. Command, then the output that justified the tick.
+
+### Task 4 — 2026-08-28
+
+`cd mobile-app && npm run verify`
+
+    52 files scanned, 0 banned runtime call(s)
+    50 files parsed, 0 failure(s)
+      ok  font stacks name only platform-guaranteed families
+            System, sans-serif, sans-serif-medium, Menlo, monospace
+      ok  every fontFamily resolves through the token          49 files
+      ok  fontVariant is supported on Android at this RN version  0.76.5
+      ok  ErrorBoundary implements both React error hooks
+      ok  MapCanvas is wrapped in an ErrorBoundary
+      ok  VehicleMarker is boundaried with a pure-GL fallback
+      ok  VehicleMarker checks MarkerView exists before using it
+      ok  the fallback is pure GL (CircleLayer), not another native view
+    hardening OK (49 files)
+    14 checks passed
+
+The hardening check was **negative-tested**, not just run: pointing the font
+stack at `Inter` made it fail with `unsafe families: Inter, Inter` and exit 1,
+then the stack was restored. A green check that cannot go red proves nothing.
+
+One bug in the check itself, found the same way. The literal-font rule was
+written as `fontFamily:\s*(?!t\.font)`, which looks correct and is not — `\s*`
+gives the space back on backtracking, the negative lookahead then succeeds one
+character early, and all 90 correct `fontFamily: t.font.sans` usages were
+reported as violations. The value is now captured and tested in JS.
 
 ### Task 2 — 2026-08-28
 

@@ -25,9 +25,62 @@ import { t } from './tokens';
  * @param fix      { latitude, longitude, heading?, source? }
  * @param heading  degrees, 0-360; falls back to the fix's own heading
  */
+/**
+ * Pure-GL stand-in for the puck: a solid, hard-edged dot in the same colour.
+ *
+ * Drawn by MapLibre's own renderer, with no React Native view and no bridge
+ * crossing, so it paints on any device that can draw the map at all. This is
+ * what the boundary in MapCanvas falls back to when MarkerView does not mount.
+ *
+ * It is NOT the accuracy halo. The halo is deliberately faint (0.22 alpha,
+ * blurred) because it sits *behind* a solid puck; on its own it reads as a
+ * smudge rather than a vehicle. Losing the puck should cost the driver the
+ * heading, not the truck.
+ */
+export function VehicleMarkerFallback({ fix }) {
+  if (!fix || !Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude)) {
+    return null;
+  }
+  const tone = fix.source === 'ekf'
+    ? t.color.sourceDeadReckoning
+    : t.color.sourceGnss;
+
+  return (
+    <MapLibreRN.ShapeSource
+      id="truck-fallback"
+      shape={{
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [fix.longitude, fix.latitude] },
+      }}
+    >
+      <MapLibreRN.CircleLayer
+        id="truck-fallback-dot"
+        style={{
+          circleRadius: 9,
+          circleColor: tone,
+          circleStrokeWidth: 3,
+          circleStrokeColor: '#FFFFFF',
+        }}
+      />
+    </MapLibreRN.ShapeSource>
+  );
+}
+
 export default function VehicleMarker({ fix, heading }) {
   if (!fix || !Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude)) {
     return null;
+  }
+
+  // The bridge may simply not be there. A MapLibre version bump that renames
+  // or drops MarkerView would otherwise surface as
+  // `React.createElement: type is invalid` at render, which is a boundary
+  // catch and a red card on the driver's map; checking for it turns that into
+  // the fallback dot, silently and correctly. Cheap, and the only way this
+  // component can know the native side disagrees with it.
+  if (!MapLibreRN.MarkerView) {
+    console.warn('[marker] MapLibreRN.MarkerView unavailable — '
+      + 'falling back to a plain dot; the driver loses heading, not the truck');
+    return <VehicleMarkerFallback fix={fix} />;
   }
 
   // GNSS blue / dead-reckoning amber -- the same two colours the dispatcher's

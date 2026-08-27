@@ -8,7 +8,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, AccessibilityInfo } from 'react-native';
 import * as MapLibreRN from '@maplibre/maplibre-react-native';
 import RNFS from 'react-native-fs';
-import VehicleMarker from './VehicleMarker';
+import VehicleMarker, { VehicleMarkerFallback } from './VehicleMarker';
+import ErrorBoundary from './ErrorBoundary';
 import { t } from './tokens';
 
 // Two stacked rasters. Bhuvan is drawn ON TOP of OSM because later layers win
@@ -497,7 +498,15 @@ export default function MapCanvas({
           </MapLibreRN.ShapeSource>
         ) : null}
 
-        <VehicleMarker fix={fix} />
+        {/* The puck is a native view (MarkerView) and is therefore the most
+            likely thing on this screen to fail on a handset nobody has tested
+            yet. Boundaried tightly, with a pure-GL dot as the fallback: the
+            driver loses the heading indicator, never the truck, and the map
+            around it keeps working. See VehicleMarkerFallback for why the
+            accuracy halo is not sufficient on its own. */}
+        <ErrorBoundary label="Vehicle marker" fallback={<VehicleMarkerFallback fix={fix} />}>
+          <VehicleMarker fix={fix} />
+        </ErrorBoundary>
 
         {(hazards ?? []).map((h) => (
           <MapLibreRN.ShapeSource

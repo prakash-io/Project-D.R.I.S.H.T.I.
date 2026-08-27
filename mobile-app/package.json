@@ -8,7 +8,7 @@
     "ios": "react-native run-ios",
     "start": "react-native start",
     "lint": "eslint src",
-    "verify": "node verify_runtime.mjs && node verify_parse.mjs && npm run test:imu",
+    "verify": "node verify_runtime.mjs && node verify_parse.mjs && node verify_hardening.mjs && npm run test:imu",
     "test:imu": "node test/simulated_imu.test.mjs",
     "test:darkzone": "make -C native/test sim_drive_track && node test/dark_zone_track.test.mjs"
   },
