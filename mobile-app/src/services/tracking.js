@@ -7,18 +7,24 @@ import { accelerometer, gyroscope, setUpdateIntervalForType, SensorTypes }
   from 'react-native-sensors';
 import * as edge from './edgeEngine';
 import * as foreground from './foregroundService';
+import { SimulatedDrive } from './simulatedDrive';
 
 const IMU_HZ = 100;
 const MAP_MATCH_EVERY_N_FIXES = 50;   // 5 s at the model's 10 Hz output
 
 export class Tracker {
-  constructor({ database, socket, graphPath, modelPath, onFix, onQueued }) {
+  constructor({ database, socket, graphPath, modelPath, onFix, onQueued, simulate }) {
     this.database = database;
     this.socket = socket;
     this.graphPath = graphPath;
     this.modelPath = modelPath;
     this.onFix = onFix;
     this.onQueued = onQueued;
+    // Prototype demonstration mode. When set, the GNSS receiver is replaced by
+    // a truck driving a real pgr_astar corridor; everything downstream of the
+    // fix is untouched. See simulatedDrive.js for why this exists.
+    this.simulate = simulate ?? null;
+    this.drive = null;
 
     this.mode = 'idle';
     this.lastFix = null;
@@ -41,8 +47,10 @@ export class Tracker {
     // neither of which tears it down.
     foreground.start('GNSS · streaming to command center');
 
-    this.watchId = Geolocation.watchPosition(
-      (position) => {
+    // ONE handler, two possible sources. The simulated drive emits a
+    // watchPosition-shaped position deliberately, so this path cannot drift
+    // between demo and real hardware -- there is only one path.
+    const onPosition = (position) => {
         const { latitude, longitude, speed, heading, altitude } = position.coords;
         this.lastFix = {
           latitude, longitude,
@@ -74,7 +82,22 @@ export class Tracker {
             console.warn('[queue]', error.message));
         }
         this.onFix?.({ ...this.lastFix, source: 'gps' });
-      },
+    };
+
+    if (this.simulate?.coordinates?.length >= 2) {
+      this.drive = new SimulatedDrive({
+        coordinates: this.simulate.coordinates,
+        speedKmh: this.simulate.speedKmh ?? 60,
+        intervalMs: 1000,
+        loop: this.simulate.loop ?? true,
+        onFix: onPosition,
+      });
+      this.drive.start();
+      return;
+    }
+
+    this.watchId = Geolocation.watchPosition(
+      onPosition,
       (error) => console.warn('[gnss]', error.message),
       {
         accuracy: { android: 'high', ios: 'best' },
@@ -181,7 +204,35 @@ export class Tracker {
     this.onQueued?.();
   }
 
+  /**
+   * Swap the simulated corridor without tearing down the tracker.
+   *
+   * A full re-init would recreate the database handle, the socket and the
+   * foreground service to change a demo route -- and cycling the service is
+   * exactly the window in which Android is entitled to freeze the process.
+   * Only the drive is replaced.
+   */
+  setCorridor(coordinates, speedKmh) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) return false;
+    this.simulate = {
+      ...(this.simulate ?? {}),
+      coordinates,
+      speedKmh: speedKmh ?? this.simulate?.speedKmh ?? 60,
+    };
+    if (this.mode !== 'online') return true;
+    // Restart through startOnline so there is one construction path for the
+    // drive rather than two that can drift apart.
+    this.stopOnline();
+    this.mode = 'idle';
+    this.startOnline();
+    return true;
+  }
+
   stopOnline() {
+    if (this.drive) {
+      this.drive.stop();
+      this.drive = null;
+    }
     if (this.watchId !== null) {
       Geolocation.clearWatch(this.watchId);
       this.watchId = null;

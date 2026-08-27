@@ -12,6 +12,7 @@ import RNFS from 'react-native-fs';
 
 import MapCanvas from './src/ui/MapCanvas';
 import MapControls from './src/ui/MapControls';
+import CorridorPicker from './src/ui/CorridorPicker';
 import SpeedCard from './src/ui/SpeedCard';
 import HudScreen from './src/ui/HudScreen';
 import HazardScreen from './src/ui/HazardScreen';
@@ -33,6 +34,7 @@ import { queueHazard, drainHazards, pendingHazardCount } from './src/services/ha
 import { ensureEdgeAssets } from './src/services/edgeAssets';
 import { refreshRouteHazards, cachedHazards, toFeatureCollection } from './src/services/hazards';
 import { speakAlert } from './src/services/voiceAlert';
+import { listCorridors, getCorridor, ensureTrip } from './src/services/corridors';
 
 // NOTE: process.env.* is NOT substituted by React Native's Babel preset --
 // only NODE_ENV is. Every one of these falls through to its literal default in
@@ -40,6 +42,20 @@ import { speakAlert } from './src/services/voiceAlert';
 const API_URL = process.env.API_URL ?? 'http://172.60.2.75:4000';
 const TRUCK_ID = process.env.TRUCK_ID ?? '651692e8-374b-401f-9b9f-e3ed86342ab5';
 const ALERT_LANG = process.env.ALERT_LANG ?? 'as';
+
+// ---------------------------------------------------------------- prototype
+// Demonstration mode. The handset is not in the North East, so real GNSS puts
+// the truck ~1,400 km outside the road graph where nothing snaps, nothing
+// routes and no hazard resolves. With this on, the GNSS receiver is replaced
+// by a truck driving a real pgr_astar corridor -- everything downstream of the
+// fix (socket, WatermelonDB queue, burst sync, backend ingest) is the live
+// path, untouched.
+//
+// Set SIM_DRIVE to false for a road test. Remember that process.env is not
+// substituted in a release bundle, so THIS DEFAULT IS WHAT SHIPS.
+const SIM_DRIVE = (process.env.SIM_DRIVE ?? 'true') !== 'false';
+const SIM_CORRIDOR = process.env.SIM_CORRIDOR ?? 'ghy-shl';
+const SIM_SPEED_KMH = Number(process.env.SIM_SPEED_KMH ?? 60);
 
 const MAX_LOGS = 40;
 
@@ -54,6 +70,17 @@ export default function App() {
   const [spokenBy, setSpokenBy] = useState(null);
   const [hazards, setHazards] = useState([]);
   const [route, setRoute] = useState(null);
+  const [corridors, setCorridors] = useState([]);
+  const [corridorId, setCorridorId] = useState(SIM_CORRIDOR);
+  const activeCorridor = useRef(null);
+  const [corridorBusy, setCorridorBusy] = useState(null);
+  // Measured, not assumed. The map control rail used to sit at a fixed 36%
+  // from the top, which cleared the stat cards but not the corridor picker
+  // added above them -- the RECENTER button ended up behind the card, and
+  // recenter is the one control a driver needs when the camera is not on the
+  // truck. Anchoring to the real height of the bottom stack means the rail
+  // stays clear whatever that stack grows to hold.
+  const [bottomH, setBottomH] = useState(0);
   const [picking, setPicking] = useState(false);
   const [linkUp, setLinkUp] = useState(false);
   const [fixAge, setFixAge] = useState(0);
@@ -63,7 +90,12 @@ export default function App() {
   const [followKey, setFollowKey] = useState(0);
   // Follow starts OFF: the map should not seize the viewport before the driver
   // has asked it to.
-  const [follow, setFollow] = useState(false);
+  // Follows by default. It was opt-in while the only fix source was the
+  // handset's own GNSS, where a driver testing indoors wants the map to stay
+  // where they put it. With the corridor drive it is the opposite: the truck
+  // is the thing to watch, and a first launch that framed the route bounds
+  // instead left the truck off-screen with no way back -- see mapControls.
+  const [follow, setFollow] = useState(true);
   const [forecast, setForecast] = useState([]);
 
   const database = useRef(null);
@@ -207,9 +239,49 @@ export default function App() {
       }
       if (disposed) return;
 
+      // The corridor the prototype drives, and the route the map draws. Both
+      // come from the same pgr_astar geometry, so the line under the truck is
+      // the line it is actually following -- not a decorative overlay.
+      let simulate = null;
+      if (SIM_DRIVE) {
+        try {
+          const list = await listCorridors(API_URL);
+          if (!disposed) setCorridors(list);
+
+          const corridor = await getCorridor(API_URL, corridorId);
+          activeCorridor.current = corridor;
+          const coordinates = corridor?.geometry?.coordinates ?? [];
+          if (coordinates.length >= 2) {
+            if (!disposed) setRoute(coordinates);
+            simulate = { coordinates, speedKmh: SIM_SPEED_KMH, loop: true };
+
+            // Without an ACTIVE trip the backend accepts every fix over the
+            // socket and then drops it: recordTelemetry joins through `trip`,
+            // gets zero rows and skips the insert WITHOUT raising. The
+            // dashboard would show a truck that never moves.
+            try {
+              await ensureTrip(API_URL, TRUCK_ID, corridor);
+              log('INFO', 'TRIP_OPEN', `Trip open on ${corridor.name}.`);
+            } catch (error) {
+              log('WARN', 'TRIP_FAIL',
+                `No active trip (${error.message}) — fixes may not persist.`);
+            }
+
+            log('INFO', 'SIM_DRIVE',
+              `Simulating ${corridor.name} — ${(corridor.distance_m / 1000).toFixed(1)} km `
+              + `at ${SIM_SPEED_KMH} km/h.`);
+            refreshHazards(coordinates);
+          }
+        } catch (error) {
+          log('ERR', 'SIM_FAIL', `Corridor unavailable: ${error.message}`);
+        }
+      }
+      if (disposed) return;
+
       tracker.current = new Tracker({
         database: database.current,
         socket: socket.current,
+        simulate,
         graphPath: graphPath ?? `${RNFS.DocumentDirectoryPath}/road_graph.sqlite`,
         modelPath: modelPath ?? `${RNFS.DocumentDirectoryPath}/speed_model.tflite`,
         onFix: (next) => {
@@ -262,6 +334,41 @@ export default function App() {
   /// Ask the model for hazards along a route and cache them. Never throws:
   /// a failed refresh leaves the previous warnings in place, because "no
   /// hazards" and "could not ask" must not look the same.
+  /**
+   * Change the demonstration corridor without restarting the app.
+   *
+   * The route the map draws and the route the truck drives are set from the
+   * SAME geometry here, so they cannot disagree -- a picker that redrew the
+   * line without moving the truck would be a worse lie than no picker.
+   */
+  const switchCorridor = async (id) => {
+    if (!id || id === corridorId || corridorBusy) return;
+    setCorridorBusy(id);
+    try {
+      const corridor = await getCorridor(API_URL, id);
+      const coordinates = corridor?.geometry?.coordinates ?? [];
+      if (coordinates.length < 2) throw new Error('corridor has no geometry');
+
+      activeCorridor.current = corridor;
+      setCorridorId(id);
+      setRoute(coordinates);
+      tracker.current?.setCorridor(coordinates, SIM_SPEED_KMH);
+
+      try {
+        await ensureTrip(API_URL, TRUCK_ID, corridor);
+      } catch (error) {
+        log('WARN', 'TRIP_FAIL', `No active trip: ${error.message}`);
+      }
+      log('INFO', 'CORRIDOR', `Now driving ${corridor.name} — `
+        + `${(corridor.distance_m / 1000).toFixed(1)} km.`);
+      refreshHazards(coordinates);
+    } catch (error) {
+      log('ERR', 'CORRIDOR_FAIL', `Could not load corridor: ${error.message}`);
+    } finally {
+      setCorridorBusy(null);
+    }
+  };
+
   const refreshHazards = async (coordinates) => {
     if (!database.current) return;
     const result = await refreshRouteHazards(database.current, {
@@ -350,7 +457,7 @@ export default function App() {
             </View>
 
             <MapControls
-              style={styles.mapControls}
+              style={[styles.mapControls, { bottom: bottomH + t.space.md }]}
               onZoomIn={() => setZoom((z) => Math.min(18, z + 1))}
               onZoomOut={() => setZoom((z) => Math.max(3, z - 1))}
               onRecenter={() => { setFollow(true); setFollowKey((k) => k + 1); }}
@@ -358,7 +465,20 @@ export default function App() {
               onToggleFollow={() => setFollow((f) => !f)}
             />
 
-            <View style={styles.mapBottom} pointerEvents="box-none">
+            <View
+              style={styles.mapBottom}
+              pointerEvents="box-none"
+              onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}
+            >
+              {SIM_DRIVE ? (
+                <CorridorPicker
+                  corridors={corridors}
+                  activeId={corridorId}
+                  busy={corridorBusy}
+                  onSelect={switchCorridor}
+                />
+              ) : null}
+
               <View style={styles.statRow}>
                 <Card style={styles.statCard}>
                   <Stat label="BEARING" unit="°"
@@ -466,7 +586,7 @@ const styles = StyleSheet.create({
   mapTop: {
     position: 'absolute', top: t.space.md, left: t.space.lg, right: t.space.lg,
   },
-  mapControls: { position: 'absolute', right: t.space.lg, top: '36%' },
+  mapControls: { position: 'absolute', right: t.space.lg },
   mapBottom: {
     position: 'absolute', left: t.space.lg, right: t.space.lg, bottom: t.space.md,
   },

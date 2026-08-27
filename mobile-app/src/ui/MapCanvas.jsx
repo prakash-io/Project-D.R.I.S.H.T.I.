@@ -39,6 +39,13 @@ const STYLE = {
       type: 'raster',
       tiles: ['https://bhuvan-vec1.nrsc.gov.in/bhuvan/gwc/service/wmts/?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=india3&STYLE=default&TILEMATRIXSET=EPSG:900913&TILEMATRIX=EPSG:900913:{z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png'],
       tileSize: 256,
+      // SOURCE maxzoom, which is a different job from the layer's. The layer
+      // maxzoom below stops Bhuvan being DRAWN past z14; this stops it being
+      // REQUESTED. Without it MapLibre still asked for z15 and the WMTS
+      // endpoint answered HTTP 400 (its EPSG:900913 matrix set has no z15 for
+      // india3), which logged as a tile error on every pan at street zoom
+      // even though nothing was missing from the picture.
+      maxzoom: 14,
       attribution: '© ISRO / NRSC Bhuvan',
     },
   },
@@ -234,6 +241,46 @@ export default function MapCanvas({
     };
   }, [route]);
 
+  // ------------------------------------------------------------- camera
+  //
+  // Driven through the ref, NOT through declarative props. The declarative
+  // form (`centerCoordinate` + `zoomLevel` spread onto <Camera>) is the
+  // obvious one and it did not work here: the component memoises its native
+  // stop, and the version that also had to switch between a centre and a
+  // `bounds` never re-issued the follow stop at all -- on the handset the map
+  // sat frozen at the route framing while the truck drove out of view, and
+  // the zoom buttons did nothing either. `setCamera` is the documented
+  // imperative API and applies every time it is called.
+  //
+  // Two mutually exclusive jobs, deliberately split into two effects:
+  const cameraRef = useRef(null);
+
+  // 1. FOLLOWING. Track the fix. `followKey` is bumped by the recentre button
+  //    so the driver can re-issue this even when nothing else changed.
+  useEffect(() => {
+    if (!follow || !fix) return;
+    cameraRef.current?.setCamera({
+      centerCoordinate: [fix.longitude, fix.latitude],
+      zoomLevel: zoom ?? 14,
+      animationDuration: reduceMotion ? 0 : 600,
+      animationMode: reduceMotion ? 'moveTo' : 'easeTo',
+    });
+  }, [follow, fix?.longitude, fix?.latitude, zoom, followKey, reduceMotion]);
+
+  // 2. FRAMING A NEW ROUTE. Once per route, and only while not following --
+  //    keyed on the bounds object, which useMemo only rebuilds when `route`
+  //    changes identity. This is what shows the driver the whole corridor
+  //    after switching to it; re-running it on every fix would fight effect 1
+  //    for the camera and make the map jitter between two framings.
+  useEffect(() => {
+    if (follow || !routeBounds) return;
+    cameraRef.current?.setCamera({
+      bounds: routeBounds,
+      animationDuration: reduceMotion ? 0 : 600,
+      animationMode: reduceMotion ? 'moveTo' : 'easeTo',
+    });
+  }, [routeBounds, follow, reduceMotion]);
+
   const routeLine = route && route.length >= 2
     ? { type: 'Feature', geometry: { type: 'LineString', coordinates: route } }
     : null;
@@ -269,15 +316,9 @@ export default function MapCanvas({
           built-in follow mode would track.
         */}
         <MapLibreRN.Camera
-          key={`cam-${follow ? 'follow' : 'free'}-${followKey ?? 0}`}
+          ref={cameraRef}
           defaultSettings={{ centerCoordinate: centre, zoomLevel: fix ? 14 : 4 }}
           followUserLocation={false}
-          {...(follow
-            ? { centerCoordinate: centre, zoomLevel: zoom ?? 14 }
-            : routeBounds
-              ? { bounds: routeBounds }
-              : {})}
-          animationDuration={reduceMotion ? 0 : 600}
         />
 
         {routeLine ? (
