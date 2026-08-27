@@ -19,6 +19,7 @@ import HazardScreen from './src/ui/HazardScreen';
 import DiagnosticsScreen from './src/ui/DiagnosticsScreen';
 import IncidentModal from './src/ui/IncidentModal';
 import RerouteAlert from './src/ui/RerouteAlert';
+import RouteSummary from './src/ui/RouteSummary';
 import TabBar from './src/ui/TabBar';
 import Button from './src/ui/Button';
 import { Card, Stat } from './src/ui/Card';
@@ -70,6 +71,10 @@ export default function App() {
   const [spokenBy, setSpokenBy] = useState(null);
   const [hazards, setHazards] = useState([]);
   const [route, setRoute] = useState(null);
+  /// Distance and ETA for whatever `route` currently holds. Null until the
+  /// backend has costed a route -- the driver client does not estimate its
+  /// own ETA, because the graph the estimate comes from lives on the server.
+  const [routeEta, setRouteEta] = useState(null);
   const [corridors, setCorridors] = useState([]);
   const [corridorId, setCorridorId] = useState(SIM_CORRIDOR);
   const activeCorridor = useRef(null);
@@ -185,21 +190,34 @@ export default function App() {
         },
 
         onRouteUpdated: async (payload) => {
-          setAlert(`Rerouted — ${(payload.distance_m / 1000).toFixed(1)} km`);
+          // The reroute payload names its figures new_distance_m /
+          // estimated_time_sec (workflow section 4). distance_m is still sent
+          // alongside and is read here as a fallback so a backend that has
+          // not been redeployed yet still drives the banner.
+          const distanceM = payload?.new_distance_m ?? payload?.distance_m;
+          const durationSec = payload?.estimated_time_sec;
+          setRouteEta({ distanceM, durationSec, rerouted: true });
+          setAlert(`Rerouted — ${(distanceM / 1000).toFixed(1)} km`);
           // The backend sends a GeoJSON LineString object, not a bare
           // coordinate array -- src/services/routing.js returns
           // `{ type: 'LineString', coordinates }` and incidents.js forwards it
           // untouched. An Array.isArray() guard here silently rejected every
           // real reroute, so the route was never drawn and the hazard forecast
           // was never requested. Both shapes are accepted now.
-          const line = routeCoordinates(payload?.geometry);
+          // route_geom is the current name; the geometry is sent once under
+          // it rather than duplicated under both keys, because these paths run
+          // to thousands of coordinates over a 3G link.
+          const line = routeCoordinates(payload?.route_geom ?? payload?.geometry);
           if (line) {
             setRoute(line);
             refreshHazards(line);
           } else {
             log('WARN', 'ROUTE_NO_GEOM', 'Reroute arrived without usable geometry.');
           }
-          log('INFO', 'REROUTE', `New route ${(payload.distance_m / 1000).toFixed(1)} km.`);
+          log('INFO', 'REROUTE',
+              `New route ${(distanceM / 1000).toFixed(1)} km`
+              + (Number.isFinite(durationSec)
+                  ? `, about ${Math.round(durationSec / 60)} min.` : '.'));
           try {
             await speakAlert({
               language: ALERT_LANG,
@@ -476,6 +494,15 @@ export default function App() {
               pointerEvents="box-none"
               onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}
             >
+              {/* Distance and ETA for the active route. Sits above the
+                  corridor picker so the driver's eye lands on it first, and
+                  inside mapBottom so MapControls keeps clearing the stack. */}
+              <RouteSummary
+                distanceM={routeEta?.distanceM}
+                durationSec={routeEta?.durationSec}
+                rerouted={routeEta?.rerouted}
+                style={styles.routeSummary}
+              />
               {SIM_DRIVE ? (
                 <CorridorPicker
                   corridors={corridors}
@@ -593,6 +620,7 @@ const styles = StyleSheet.create({
     position: 'absolute', top: t.space.md, left: t.space.lg, right: t.space.lg,
   },
   mapControls: { position: 'absolute', right: t.space.lg },
+  routeSummary: { marginHorizontal: 0 },
   mapBottom: {
     position: 'absolute', left: t.space.lg, right: t.space.lg, bottom: t.space.md,
   },

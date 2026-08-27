@@ -40,6 +40,7 @@ export function useDemoRoute() {
         destination_name: corridor.destination_name,
         coordinates,
         distance_m: body.distance_m,
+        estimated_time_sec: body.estimated_time_sec,
         edge_count: body.edge_count,
       });
     } catch (e) {

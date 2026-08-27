@@ -88,19 +88,59 @@ def test_two_vision_classes_are_filename_arithmetic(vision_labels):
 
 
 def test_the_model_does_not_emit_the_arithmetic_classes():
-    """Whatever the dataset says, the served model must not offer noise."""
-    assert "NORMAL_TERRAIN" not in config.YOLO_CLASSES
+    """The served model must not offer a class whose labels were noise.
+
+    DAMAGED_BRIDGE_INFRASTRUCTURE still is noise (flood idx % 12 == 0), so it
+    stays out. NORMAL_TERRAIN is NOT in this list any more: it is no longer
+    the dataset's arithmetic label but a separately sourced pool of real
+    ground-level photographs, so it is asserted present below instead.
+    """
     assert "DAMAGED_BRIDGE_INFRASTRUCTURE" not in config.YOLO_CLASSES
 
 
-def test_review_gate_is_on_while_there_is_no_no_incident_class():
-    """The gate may only be lifted once the model can say 'no incident'."""
-    if "NORMAL_TERRAIN" in config.YOLO_CLASSES:
-        pytest.skip("model has a NORMAL_TERRAIN class; the gate may be reconsidered")
+def test_the_model_can_say_no_hazard_here():
+    """The negative class must exist, or the endpoint cannot refuse anything.
+
+    With only the two hazard classes the softmax sums to 1 over them, so
+    top-1 >= 0.5 by construction and every photograph on earth is a flood or
+    a landslide. This is the single assertion standing between the platform
+    and the reported bug.
+    """
+    assert "NORMAL_TERRAIN" in config.YOLO_CLASSES, (
+        "the negative class is gone -- /verify-incident can no longer answer "
+        "'no hazard here' and every upload will be forced into a hazard"
+    )
+    assert config.YOLO_CLASS_TO_INCIDENT_KIND["NORMAL_TERRAIN"] is None
+
+
+def test_the_negative_pool_is_real_images_not_arithmetic():
+    """NORMAL_TERRAIN must be backed by an actual image pool on disk."""
+    negatives = ROOT / "data" / "raw" / "vision" / "normal_terrain"
+    if not negatives.is_dir():
+        pytest.skip("negative pool not fetched")
+    images = [p for p in negatives.iterdir()
+              if p.suffix.lower() in {".jpg", ".jpeg", ".png"} and p.stat().st_size > 0]
+    assert len(images) >= 100, (
+        f"only {len(images)} negatives on disk; a class this thin trains a "
+        f"label the model will never predict"
+    )
+
+
+def test_review_gate_stays_on_while_hazards_are_out_of_distribution():
+    """The gate survives the negative class, because it was never only that.
+
+    Two reasons put it there. Adding NORMAL_TERRAIN closes the first -- the
+    model can now decline to see a hazard that is not present. It does not
+    touch the second: the two HAZARD classes are still aerial and satellite
+    imagery, so a driver's ground-level photo of a real landslide remains out
+    of distribution. Being able to say "nothing here" is not the same as
+    being able to recognise something that is.
+    """
     assert config.INCIDENT_REQUIRE_REVIEW, (
-        "INCIDENT_REQUIRE_REVIEW was disabled while the model still has no "
-        "'no incident' class -- a photo of an empty road can only come back "
-        "as flood or landslide, and API-03 would block the edge."
+        "INCIDENT_REQUIRE_REVIEW was disabled while the hazard classes are "
+        "still trained on aerial and satellite imagery; a driver's photo of a "
+        "real landslide is out of distribution and API-03 would block an edge "
+        "on it unreviewed."
     )
 
 

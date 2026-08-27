@@ -326,14 +326,23 @@ export async function rerouteAffectedTrips(edgeId, incidentId) {
          `edge ${edgeId} blocked by incident ${incidentId}`]);
     });
 
+    // `route_geom` carries the geometry ONCE. It was tempting to keep the old
+    // `geometry` key alongside it for compatibility, but the two would
+    // serialise as two full copies of a path that runs to several thousand
+    // coordinates -- roughly 200 KB duplicated over the valley 3G link this
+    // whole platform exists to survive. The scalar keys are free, so the old
+    // `distance_m` does stay: the two mission scripts read it.
     const payload = {
       trip_id: trip.trip_id, truck_id: trip.truck_id, incident_id: incidentId,
-      distance_m: route.distanceM, geometry: route.geometry,
+      route_geom: route.geometry,
+      new_distance_m: route.distanceM,
+      estimated_time_sec: route.durationSec,
+      distance_m: route.distanceM,
     };
     emitTo(`truck:${trip.truck_id}`, ROUTE_EVENT, payload);
     emitTo('dispatchers', ROUTE_EVENT, payload);
     results.push({ trip_id: trip.trip_id, truck_id: trip.truck_id, rerouted: true,
-      distance_m: route.distanceM });
+      distance_m: route.distanceM, estimated_time_sec: route.durationSec });
   }
   return results;
 }

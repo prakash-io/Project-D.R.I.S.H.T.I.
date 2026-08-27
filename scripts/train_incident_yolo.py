@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import shutil
@@ -83,6 +84,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SRC = ROOT / "data" / "raw" / "vision" / "incident-yolo"
+DEFAULT_NEGATIVES = ROOT / "data" / "raw" / "vision" / "normal_terrain"
 DEFAULT_CLS_DIR = ROOT / "data" / "processed" / "vision" / "incident-cls"
 DEFAULT_OUT = ROOT / "data" / "artifacts" / "vision" / "incident-yolov8n.pt"
 
@@ -96,6 +98,53 @@ POOL_TO_CLASS = {
     "flood": "FLOODED_ROAD_OR_SUBMERGED",
     "landslide": "ACTIVE_LANDSLIDE_DEBRIS",
 }
+
+#: The negative class. Not in `incident-yolo` -- both of its pools are
+#: hazards -- so it is sourced separately by scripts/fetch_normal_terrain.py.
+#:
+#: Without it the model has TWO classes whose softmax sums to 1, and therefore
+#: no way to answer "neither". Every photograph ever uploaded is forced to be a
+#: flood or a landslide; a picture of a footballer scores
+#: ACTIVE_LANDSLIDE_DEBRIS at 1.000. No confidence threshold repairs that,
+#: because the confidence is not wrong -- it is the only answer the label
+#: space permits. Measured before this class existed: held-out normal terrain
+#: came back as landslide at median confidence 0.794, against 0.786 for real
+#: landslides. The distributions overlap, so no cutoff separates them.
+NEGATIVE_CLASS = "NORMAL_TERRAIN"
+
+#: Split proportions for the negatives, matching the hazard splits already in
+#: the source tree (965/207/208 = 70/15/15).
+NEG_TRAIN_PCT, NEG_VAL_PCT = 70, 85
+
+
+def negative_split(filename: str) -> str:
+    """Deterministic train/val/test bucket for one negative image.
+
+    Hashed on the FILENAME rather than taken from an index or a shuffle, so
+    that adding more negatives later leaves every existing image in the split
+    it was already in. A random shuffle would silently move test images into
+    train on the next run and quietly invalidate the held-out score.
+    """
+    bucket = int(hashlib.sha1(filename.encode()).hexdigest()[:8], 16) % 100
+    if bucket < NEG_TRAIN_PCT:
+        return "train"
+    return "val" if bucket < NEG_VAL_PCT else "test"
+
+
+def link_negatives(negatives_dir: Path, dst: Path) -> dict[str, int]:
+    """Symlink the negative pool into dst/<split>/NORMAL_TERRAIN/."""
+    images = sorted(p for p in negatives_dir.iterdir()
+                    if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+                    and p.stat().st_size > 0)
+    counts: collections.Counter = collections.Counter()
+    for image_path in images:
+        split = negative_split(image_path.name)
+        folder = dst / split / NEGATIVE_CLASS
+        folder.mkdir(parents=True, exist_ok=True)
+        link = folder / image_path.name
+        os.symlink(os.path.relpath(image_path, link.parent), link)
+        counts[split] += 1
+    return dict(counts)
 
 
 def read_classes(src: Path) -> list[str]:
@@ -122,7 +171,8 @@ def pool_of(stem: str) -> str | None:
 
 
 def build_classification_tree(src: Path, dst: Path, classes: list[str],
-                             label_source: str) -> dict:
+                             label_source: str,
+                             negatives_dir: Path | None = None) -> dict:
     """Materialise `dst/<split>/<CLASS>/<image>` for the chosen label source.
 
     Symlinks, not copies: the source images are 1,380 JPEGs under an immutable
@@ -175,10 +225,21 @@ def build_classification_tree(src: Path, dst: Path, classes: list[str],
 
         stats[split] = {"counts": dict(counts), "total": sum(counts.values()),
                         "skipped": skipped}
+
+    if negatives_dir is not None:
+        neg_counts = link_negatives(negatives_dir, dst)
+        for split in SPLITS:
+            n = neg_counts.get(split, 0)
+            stats[split]["counts"][NEGATIVE_CLASS] = n
+            stats[split]["total"] += n
+
+    for split in SPLITS:
+        counts = stats[split]["counts"]
         detail = "  ".join(f"{c}={counts.get(c, 0)}" for c in classes)
-        print(f"  {split:5} {sum(counts.values()):4} images   {detail}")
-        if skipped:
-            print(f"        skipped {len(skipped)}: {skipped[:5]}")
+        print(f"  {split:5} {stats[split]['total']:4} images   {detail}")
+        if stats[split]["skipped"]:
+            print(f"        skipped {len(stats[split]['skipped'])}: "
+                  f"{stats[split]['skipped'][:5]}")
     return stats
 
 
@@ -196,16 +257,41 @@ def main() -> int:
                     help="'pool' (default) = 2 content-derived classes; "
                          "'file' = the 4 shipped labels, 2 of which are index "
                          "arithmetic rather than image content")
+    ap.add_argument("--negatives", type=Path, default=DEFAULT_NEGATIVES,
+                    help="directory of NORMAL_TERRAIN images; pass --no-negatives "
+                         "to reproduce the old two-class model")
+    ap.add_argument("--no-negatives", action="store_true",
+                    help="train without the negative class -- the model then has "
+                         "no way to answer 'no hazard here'")
     ap.add_argument("--prepare-only", action="store_true",
                     help="build the classification tree and stop")
     args = ap.parse_args()
 
     t0 = time.time()
     declared = read_classes(args.src)
+    negatives_dir: Path | None = None
+    if not args.no_negatives:
+        if not args.negatives.is_dir():
+            sys.exit(f"error: {args.negatives} not found. Run "
+                     f"scripts/fetch_normal_terrain.py first, or pass "
+                     f"--no-negatives to train the old two-class model.")
+        n_negatives = sum(1 for p in args.negatives.iterdir()
+                          if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+                          and p.stat().st_size > 0)
+        if n_negatives < 100:
+            sys.exit(f"error: only {n_negatives} negatives in {args.negatives}. "
+                     f"A negative class this thin is worse than none -- it "
+                     f"trains a class the model will never predict.")
+        negatives_dir = args.negatives
+        print(f"==> negative class {NEGATIVE_CLASS}: {n_negatives} images from "
+              f"{args.negatives.relative_to(ROOT)}")
+
     if args.label_source == "pool":
         # Order fixed here rather than taken from data.yaml: in pool mode
         # data.yaml's 4-class list is not the label space being trained.
         classes = [POOL_TO_CLASS["flood"], POOL_TO_CLASS["landslide"]]
+        if negatives_dir is not None:
+            classes.append(NEGATIVE_CLASS)
         print(f"==> label source 'pool': {len(classes)} content-derived classes "
               f"{classes}")
         print(f"    (data.yaml declares 4: {declared} -- two of them are "
@@ -219,7 +305,7 @@ def main() -> int:
 
     print(f"==> building classification tree at {args.cls_dir.relative_to(ROOT)}")
     stats = build_classification_tree(args.src, args.cls_dir, classes,
-                                      args.label_source)
+                                      args.label_source, negatives_dir)
     if args.prepare_only:
         print("==> --prepare-only, stopping")
         return 0
@@ -292,6 +378,20 @@ def main() -> int:
         "base_weights": "yolov8n-cls.pt",
         "reason_classify_not_detect": "every image in the source carries exactly one box",
         "label_source": args.label_source,
+        "negative_class": None if negatives_dir is None else {
+            "name": NEGATIVE_CLASS,
+            "source": str(negatives_dir.relative_to(ROOT)),
+            "why": (
+                "a two-class softmax cannot answer 'neither', so every upload "
+                "was forced to be a flood or a landslide; this class is what "
+                "makes 'no hazard here' representable"
+            ),
+            "not_closed": (
+                "these are ordinary ground-level photographs, not photographs "
+                "of normal NER roads; the model remains out of distribution on "
+                "a driver's real photo of a fine road. See REVISION.md Q8."
+            ),
+        },
         "label_source_note": (
             "pool = 2 content-derived classes from the image pool; the shipped "
             "4-class labels include two assigned by filename index arithmetic "
