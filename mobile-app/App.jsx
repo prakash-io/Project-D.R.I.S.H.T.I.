@@ -4,7 +4,7 @@
 // MAP (glanceable, map-centric), HAZARD (report + queue), SYNC (diagnostics).
 // Nothing about the data path changed with the redesign: GNSS when online, the
 // C++ EKF when not, WatermelonDB in between, and Bhashini reading alerts aloud.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { SafeAreaView, StatusBar, View, Text, StyleSheet, Platform } from 'react-native';
 import { launchCamera } from 'react-native-image-picker';
 import Icon from 'react-native-vector-icons/MaterialIcons';
@@ -96,6 +96,8 @@ export default function App() {
   // is the thing to watch, and a first launch that framed the route bounds
   // instead left the truck off-screen with no way back -- see mapControls.
   const [follow, setFollow] = useState(true);
+  /// Stable so MapCanvas's gesture handler is not rebuilt on every fix.
+  const stopFollowing = useCallback(() => setFollow(false), []);
   const [forecast, setForecast] = useState([]);
 
   const database = useRef(null);
@@ -451,6 +453,10 @@ export default function App() {
             fix={fix} route={route} hazards={hazards}
             forecast={toFeatureCollection(forecast)}
             zoom={zoom} follow={follow} followKey={followKey}
+            // A drag, pinch or rotate hands the viewport to the driver. The
+            // recentre button below is the only way back, which is the
+            // Google Maps contract and the one drivers already expect.
+            onUserPan={stopFollowing}
           >
             <View style={styles.mapTop} pointerEvents="box-none">
               <SpeedCard fix={fix} mode={mode} ageMs={fixAge} />

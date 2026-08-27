@@ -130,7 +130,7 @@ function isNight(now = new Date()) {
 const CACHE_HALF_SPAN = 0.1;
 
 export default function MapCanvas({
-  fix, route, hazards, forecast, zoom, follow, followKey, children,
+  fix, route, hazards, forecast, zoom, follow, followKey, onUserPan, children,
 }) {
   const [cacheState, setCacheState] = useState('idle');
   const [night, setNight] = useState(() => isNight());
@@ -281,6 +281,44 @@ export default function MapCanvas({
     });
   }, [routeBounds, follow, reduceMotion]);
 
+  // 3. ZOOM WHILE FREE. Effect 1 carries the zoom while following, so once
+  //    the driver pans away it never runs again and the +/- buttons go dead
+  //    at exactly the moment the map is theirs to explore. Issuing zoomLevel
+  //    on its own leaves the centre where the driver put it.
+  //
+  //    Keyed on an actual CHANGE in `zoom`, not on the dependency list firing:
+  //    `follow` is a dependency (the effect must know which mode it is in) but
+  //    a follow flip must not re-issue a camera stop, or the pinch-zoom that
+  //    just broke follow would be snapped back to the button state.
+  const lastZoom = useRef(zoom);
+  useEffect(() => {
+    if (lastZoom.current === zoom) return;
+    lastZoom.current = zoom;
+    if (follow) return;
+    cameraRef.current?.setCamera({
+      zoomLevel: zoom,
+      animationDuration: reduceMotion ? 0 : 220,
+      animationMode: reduceMotion ? 'moveTo' : 'easeTo',
+    });
+  }, [zoom, follow, reduceMotion]);
+
+  // ------------------------------------------------- gesture breaks follow
+  //
+  // Without this the decouple is only half-built. The camera stops being
+  // re-issued only once `follow` is ALREADY false, so a driver who drags
+  // while following is yanked back by the very next fix -- at 1 Hz, which
+  // does not read as "the map snapped back", it reads as a map that cannot
+  // be moved at all. That is the reported symptom.
+  //
+  // onRegionWillChange fires once at the START of a camera change, unlike
+  // onRegionIsChanging which fires per frame. `isUserInteraction` is what
+  // separates the driver's finger from our own setCamera stops: those raise
+  // the same event with the flag false, so following does not cancel itself
+  // on its own animation.
+  const handleRegionWillChange = React.useCallback((event) => {
+    if (event?.properties?.isUserInteraction) onUserPan?.();
+  }, [onUserPan]);
+
   const routeLine = route && route.length >= 2
     ? { type: 'Feature', geometry: { type: 'LineString', coordinates: route } }
     : null;
@@ -299,6 +337,7 @@ export default function MapCanvas({
         logoEnabled={false}
         // Bhuvan/NRSC attribution is a licence condition of the tile source.
         attributionEnabled
+        onRegionWillChange={handleRegionWillChange}
       >
         {/*
           The camera is only DRIVEN while following. Previously
