@@ -350,6 +350,27 @@ reported as violations. The value is now captured and tested in JS.
       ok  no console errors
       ok  graph restored  0 active blocked edges
 
+**A caveat on re-running `verify.mjs`.** The 27/27 above is real and
+reproducible, but later runs in the same session intermittently reported 3-4
+failures, always the same ones: `approve endpoint` capturing only the CORS
+preflight, plus the two checks that depend on it. This is the harness, not the
+console. Three independent confirmations that the flow works:
+
+* an independent Playwright run clicked Approve and recorded
+  `POST /incidents/:id/approve => [200] OK` followed by the queue refetching;
+* `curl` against the same endpoint returns 200 in 4.0 s with 8 reroutes;
+* the database shows the incident reaching `approved_by = 'dispatcher'` — the
+  value the *dashboard* sends — on a run the harness had marked failed.
+
+The cause is reroute latency, which varies from ~4 s to ~18.6 s depending on
+how many trips `mock_stream` has accumulated and whether it is writing
+telemetry concurrently; `verify.mjs` polls for 30 s and occasionally misses the
+response anyway. Two other failure modes are pure environment: `mock_stream`
+expires after its `--seconds` window (telemetry checks then fail), and the
+script consumes one pending incident per run and does not create its own —
+both already documented in CLAUDE.md. Seed a fresh incident and restart
+`mock_stream` immediately before each run.
+
 Routes checked in a live browser (Playwright MCP), 0 console errors on each:
 
 * `/weather` — nav badge "51 segments over threshold"; cards read
