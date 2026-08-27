@@ -58,10 +58,21 @@ export const BASEMAP_STYLE = {
 
 // Guwahati. The largest city in the NER and the natural hub for the corridors
 // this platform routes over.
+// Pitched, and that is a functional choice rather than a flourish. The trucks
+// are 3D glTF models drawn by a ScenegraphLayer (MapView), and at pitch 0 a
+// model is seen from directly above: the silhouette collapses to a rectangle,
+// the heading it encodes becomes unreadable, and the layer costs a great deal
+// more than the ScatterplotLayer it replaced for no gain at all.
+//
+// 40 degrees rather than more. Past roughly 50 the far half of the viewport
+// compresses into the horizon and a corridor running north-south stops being
+// comparable end to end, which is exactly the judgement this console exists
+// to support. The dispatcher can still tilt and rotate freely -- MapView
+// enables dragRotate -- so this is only the opening frame.
 export const INITIAL_VIEW_STATE = {
   longitude: 91.7362,
   latitude: 26.1445,
   zoom: 9,
-  pitch: 0,
-  bearing: 0,
+  pitch: 40,
+  bearing: -18,
 };

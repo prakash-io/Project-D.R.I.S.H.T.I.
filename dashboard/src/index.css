@@ -145,3 +145,115 @@
 }
 .maplibregl-ctrl-attrib a { @apply !text-muted; }
 .maplibregl-ctrl-group button + button { border-top-color: rgb(var(--border-hairline)); }
+
+@layer components {
+  /* -------------------------------------------------------- glass surfaces
+     The navigation chrome, and only the navigation chrome.
+
+     A note for whoever edits this next, because it looks like a violation of
+     section 5 and is not quite one. The substrate is a CRT terminal: opaque
+     compartments, hairline rules, and an absolute rejection of border-radius
+     that tailwind.config.js enforces by zeroing the whole scale. Glass was
+     asked for by name for the navigation layer, so it is built from the two
+     properties that actually make a surface read as glass -- TRANSLUCENCY and
+     BLUR -- and not from the third thing usually bundled with them. The radius
+     stays 0. Rounded corners are a fashion that travels with glassmorphism;
+     they are not what makes it legible as glass, and breaking that rule would
+     have cost the console its whole visual argument for a decoration.
+
+     The blur is what earns its place here: the nav floats over a live map, and
+     a translucent panel with no blur would let corridor lines and truck
+     markers read straight through the labels. backdrop-filter turns that
+     background into a wash instead of competing detail.
+
+     Never applied over the deck.gl canvas -- same rule the CRT and grain
+     effects already follow (section 7). Chrome only. */
+  .glass {
+    background:
+      linear-gradient(
+        180deg,
+        rgb(var(--p-ink-100) / 0.78) 0%,
+        rgb(var(--p-ink-050) / 0.86) 100%
+      );
+    backdrop-filter: blur(18px) saturate(1.25);
+    -webkit-backdrop-filter: blur(18px) saturate(1.25);
+    border: var(--hairline) solid rgb(var(--border-hairline) / 0.9);
+    /* The top inset highlight is the "lit edge" of a glass pane. Without it a
+       translucent dark panel reads as a hole in the page rather than a sheet
+       sitting above it. */
+    box-shadow:
+      inset 0 1px 0 0 rgb(var(--p-phos-100) / 0.07),
+      0 18px 44px -22px rgb(0 0 0 / 0.9);
+  }
+
+  /* A slow diagonal sheen across the top edge, so the pane has a direction
+     the flat gradient alone cannot give it. Decorative and inert. */
+  .glass-sheen { position: relative; overflow: hidden; }
+  .glass-sheen::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 45%;
+    pointer-events: none;
+    background: linear-gradient(
+      104deg,
+      rgb(var(--p-phos-100) / 0.055) 0%,
+      transparent 58%
+    );
+  }
+
+  /* The selected route in the navigation rail. A left hairline bar rather
+     than a filled pill: the fill would need a radius to look intentional,
+     and the bar is how every other selected thing in this console is
+     marked. */
+  .glass-active {
+    background:
+      linear-gradient(
+        90deg,
+        rgb(var(--p-phos-100) / 0.10) 0%,
+        rgb(var(--p-phos-100) / 0.02) 100%
+      );
+    box-shadow: inset 2px 0 0 0 rgb(var(--text-primary));
+  }
+
+  /* ------------------------------------------------------- hazard alerting
+     A card for a segment scoring over the flag threshold.
+
+     The glow is on the BORDER and a spread shadow, never on the text:
+     text-shadow on an alert string is the first thing to cost legibility at
+     small sizes, and this card exists to be read quickly. --accent-alert is
+     the same red the map draws risk corridors in, so a card and the line it
+     refers to are the same colour by construction. */
+  .alert-glass {
+    background:
+      linear-gradient(
+        180deg,
+        rgb(var(--accent-alert) / 0.14) 0%,
+        rgb(var(--p-ink-100) / 0.82) 62%
+      );
+    backdrop-filter: blur(14px) saturate(1.2);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    border: var(--hairline) solid rgb(var(--accent-alert) / 0.65);
+    box-shadow:
+      inset 0 1px 0 0 rgb(var(--accent-alert) / 0.28),
+      0 0 22px -6px rgb(var(--accent-alert) / 0.55);
+  }
+
+  /* Reserved for the single highest-scoring segment on screen. A pulse on
+     every card at once is wallpaper; on exactly one it is a pointer.
+
+     Honours prefers-reduced-motion: a dispatcher who has asked the OS to stop
+     animation should not be handed a pulsing red box for hours. */
+  @keyframes alert-breathe {
+    0%, 100% { box-shadow:
+      inset 0 1px 0 0 rgb(var(--accent-alert) / 0.28),
+      0 0 20px -8px rgb(var(--accent-alert) / 0.45); }
+    50%      { box-shadow:
+      inset 0 1px 0 0 rgb(var(--accent-alert) / 0.40),
+      0 0 34px -4px rgb(var(--accent-alert) / 0.85); }
+  }
+  .alert-critical { animation: alert-breathe 2.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .alert-critical { animation: none; }
+  }
+}

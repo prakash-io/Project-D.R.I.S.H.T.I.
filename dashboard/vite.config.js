@@ -14,8 +14,20 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          deck: ['deck.gl', '@deck.gl/react'],
+          deck: ['deck.gl', '@deck.gl/react', '@deck.gl/mesh-layers'],
           map: ['maplibre-gl', 'react-map-gl'],
+          // Three.js is chunked separately so the "no three.js on the map"
+          // rule is MECHANICALLY checkable rather than a convention someone
+          // has to remember. scripts/check_three_isolation.mjs asserts that
+          // the three renderer's symbols appear in this chunk and in neither
+          // of the two above; if a future edit imports three from a map
+          // module, rollup folds it into the map chunk and that check fails.
+          //
+          // It also happens to be the right split on its own terms: the
+          // navigation mark and the analytics chart are the only consumers,
+          // and a dispatcher who never opens Analytics still pays for the
+          // navigation mark, which is small.
+          three: ['three', '@react-three/fiber'],
         },
       },
     },

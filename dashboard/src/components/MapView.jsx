@@ -2,9 +2,15 @@
 import React, { useMemo } from 'react';
 import DeckGL from '@deck.gl/react';
 import { ScatterplotLayer, PathLayer } from '@deck.gl/layers';
+import { ScenegraphLayer } from '@deck.gl/mesh-layers';
 import Map from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { BASEMAP_STYLE, INITIAL_VIEW_STATE } from '../lib/mapStyle';
+
+/// Served from public/, built by scripts/gen_truck_gltf.mjs. Not fetched from
+/// a model CDN: this console must come up with no third-party request, the
+/// same constraint that put the basemap behind our own /tiles proxy.
+const TRUCK_MODEL = '/models/truck.glb';
 
 /// Red at 1.0 through amber at the threshold. A dispatcher should be able to
 /// rank two red corridors by eye without reading a number off either.
@@ -116,6 +122,17 @@ export default function MapView({
         radiusMinPixels: 4,
       }));
 
+      // The ground anchor, kept UNDER the 3D model rather than replaced by it.
+      //
+      // Same reasoning VehicleMarker.jsx uses on the phone: the flat layer is
+      // pure GL and always paints, the model is an asset that has to load. If
+      // truck.gltf ever 404s behind a bad deploy, or a device gives up on the
+      // scenegraph, the dispatcher still sees every truck in the right place
+      // and the right colour -- they lose the silhouette, not the fleet.
+      //
+      // It also does real work when the model IS loading: at low zoom a
+      // pitched 3D truck is a few pixels tall, and the dot is what makes the
+      // position findable at region scale.
       built.push(new ScatterplotLayer({
         id: 'trucks',
         data: trucks,
@@ -127,13 +144,61 @@ export default function MapView({
         lineWidthMinPixels: 2,
         stroked: true,
         radiusUnits: 'pixels',
-        getRadius: 7,
+        getRadius: 5,
         pickable: true,
         onClick: (info) => onTruckClick?.(info.object),
         // deck.gl memoises layer data by reference; without this the markers
         // would only redraw when the array identity changed, which is once a
         // second -- undoing the interpolation entirely.
         updateTriggers: { getPosition: trucks },
+      }));
+
+      // The 3D vehicle (WEB-03). deck.gl's ScenegraphLayer, NOT three.js --
+      // three.js is confined to the dashboard chrome (the nav mark and the
+      // analytics chart) and never touches the map, so there is exactly one
+      // renderer holding the map's projection and picking.
+      built.push(new ScenegraphLayer({
+        id: 'trucks-3d',
+        data: trucks,
+        scenegraph: TRUCK_MODEL,
+        // No `loaders` override here, and that is deliberate — an earlier
+        // version passed `loaders: [GLTFLoader]` as belt-and-braces and it
+        // broke the layer outright:
+        //
+        //   Geometry truck-primitive-0 attribute POSITION:
+        //   must be typed array or object with value as typed array
+        //
+        // ScenegraphLayer does not just parse the glTF, it parses it with
+        // `postProcess: true`, which is the step that resolves accessors into
+        // the typed arrays luma.gl builds its Geometry from. Supplying the
+        // bare loader replaced that configured pipeline with an unconfigured
+        // one, so the layer received raw accessor descriptors. The layer's
+        // own default is already correct; overriding it can only be wrong.
+        getPosition: (d) => d.position,
+        // [pitch, yaw, roll]. The roll of 90 is what reconciles glTF's Y-up
+        // convention with deck.gl's Z-up world; the model is built nose-along
+        // +X, so negating the compass heading turns clockwise-from-north into
+        // the scene's counter-clockwise yaw.
+        getOrientation: (d) => [0, -(d.heading ?? 0), 90],
+        // Tint, not texture. The model ships near-white specifically so this
+        // multiply lands cleanly -- see scripts/gen_truck_gltf.mjs.
+        getColor: (d) => (d.source === 'ekf' ? [210, 153, 34] : [88, 166, 255]),
+        // Metres. The model is ~4.7 units nose to tail, so this renders a
+        // vehicle about 14 m long: legible when a dispatcher zooms to a
+        // junction, and honest about the footprint of a goods truck.
+        sizeScale: 3,
+        // Without a floor the truck shrinks to nothing at region zoom and the
+        // dispatcher loses the heading exactly when scanning the whole map.
+        sizeMinPixels: 12,
+        sizeMaxPixels: 96,
+        _lighting: 'pbr',
+        pickable: true,
+        onClick: (info) => onTruckClick?.(info.object),
+        updateTriggers: {
+          getPosition: trucks,
+          getOrientation: trucks,
+          getColor: trucks,
+        },
       }));
     }
 
@@ -144,7 +209,11 @@ export default function MapView({
   return (
     <DeckGL
       initialViewState={INITIAL_VIEW_STATE}
-      controller={{ dragRotate: false }}
+      // Rotation is enabled now that the trucks are 3D models. It was off
+      // while they were flat dots, where tilting only cost legibility; with a
+      // scenegraph the dispatcher needs to be able to get around a vehicle to
+      // read its heading against the road it is on.
+      controller={{ dragRotate: true }}
       layers={layers}
       getTooltip={({ object }) => {
         if (!object) return null;
