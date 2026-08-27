@@ -15,7 +15,7 @@ function riskColor(score) {
 
 export default function MapView({
   trucks, riskFeatures, showRisk, showTrucks, onTruckClick,
-  corridors, showCorridors,
+  corridors, showCorridors, activeRoute,
 }) {
   const layers = useMemo(() => {
     const built = [];
@@ -51,6 +51,32 @@ export default function MapView({
         capRounded: true,
         jointRounded: true,
         pickable: true,
+      }));
+    }
+
+    // The route the dispatcher just planned from the demo sidebar.
+    //
+    // No new hue. Section 4 spends its colours on alert red plus the two
+    // encoded telemetry colours, and the corridors layer already argued that
+    // a fourth would compete -- a selected route is the same KIND of thing as
+    // a corridor, just the one being looked at, so it separates itself by
+    // weight instead: drawn over the corridor layer, twice the width, fully
+    // opaque against the corridor's 200 alpha.
+    //
+    // Pushed BEFORE the risk layer so a red segment still reads through the
+    // route that crosses it. The whole point of planning over `routable_edges`
+    // is to see the hazard the path is running into.
+    if (activeRoute) {
+      built.push(new PathLayer({
+        id: 'active-route',
+        data: [activeRoute],
+        getPath: (r) => r.coordinates,
+        getColor: [234, 234, 234, 255],
+        widthUnits: 'pixels',
+        getWidth: 6,
+        capRounded: true,
+        jointRounded: true,
+        pickable: false,
       }));
     }
 
@@ -112,7 +138,8 @@ export default function MapView({
     }
 
     return built;
-  }, [trucks, riskFeatures, showRisk, showTrucks, onTruckClick, corridors, showCorridors]);
+  }, [trucks, riskFeatures, showRisk, showTrucks, onTruckClick, corridors,
+      showCorridors, activeRoute]);
 
   return (
     <DeckGL

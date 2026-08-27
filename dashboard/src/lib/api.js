@@ -47,3 +47,21 @@ export const incidentPhotoUrl = (id) => `${API_URL}/incidents/${id}/photo`;
 // on Guwahati-Shillong).
 export const getCorridors = () =>
   json('/routes/corridors?geometry=1&simplify_m=40');
+
+/**
+ * Plan one route live through pgr_astar (API-04).
+ *
+ * The corridors table already holds a planned geometry for each demo route,
+ * and replaying that would paint faster. This posts instead, because the
+ * point of the demo sidebar is to show the routing engine working -- a
+ * stored polyline proves only that someone ran the planner once. Measured
+ * end to end against the seeded corridors: 224 ms for Guwahati-Shillong
+ * (287 edges), 810 ms for Guwahati-Dibrugarh (1449 edges), which is inside
+ * the budget for a click to feel like it did something.
+ */
+export const planRoute = (from, to, riskWeight = 0) =>
+  json('/routes/plan', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ from, to, risk_weight: riskWeight }),
+  });

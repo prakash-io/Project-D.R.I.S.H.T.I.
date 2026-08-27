@@ -3,10 +3,12 @@ import MapView from './components/MapView';
 import IncidentPanel from './components/IncidentPanel';
 import ControlBar from './components/ControlBar';
 import CommandRail from './components/CommandRail';
+import DemoSidebar from './components/DemoSidebar';
 import { useTelemetry } from './hooks/useTelemetry';
 import { useIncidents } from './hooks/useIncidents';
 import { useRiskSegments } from './hooks/useRiskSegments';
 import { useCorridors } from './hooks/useCorridors';
+import { useDemoRoute } from './hooks/useDemoRoute';
 
 const RISK_THRESHOLD = 0.85;
 
@@ -27,6 +29,7 @@ export default function App() {
     threshold: RISK_THRESHOLD,
   });
   const { corridors, loading: corridorLoading } = useCorridors();
+  const demo = useDemoRoute();
 
   const dr = selectedTruck?.source === 'ekf';
 
@@ -39,6 +42,16 @@ export default function App() {
         segmentCount={showRisk ? features.length : 0}
         corridorCount={showCorridors ? corridors.length : 0}
         queueCount={incidents.length}
+      />
+
+      <DemoSidebar
+        corridors={corridors}
+        loading={corridorLoading}
+        route={demo.route}
+        pendingId={demo.pendingId}
+        error={demo.error}
+        onSelect={demo.select}
+        onClear={demo.clear}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -69,6 +82,7 @@ export default function App() {
               onTruckClick={setSelectedTruck}
               corridors={corridors}
               showCorridors={showCorridors}
+              activeRoute={demo.route}
             />
 
             {selectedTruck && (
