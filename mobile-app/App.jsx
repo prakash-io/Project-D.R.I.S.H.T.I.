@@ -44,7 +44,7 @@ import { listPlaces, planTrip, ackReroute, routeCoordinates }
 // NOTE: process.env.* is NOT substituted by React Native's Babel preset --
 // only NODE_ENV is. Every one of these falls through to its literal default in
 // a release bundle, so the default is the value that actually ships.
-const API_URL = process.env.API_URL ?? 'http://172.60.2.75:4000';
+const API_URL = process.env.API_URL ?? 'http://172.18.9.197:4000';
 const TRUCK_ID = process.env.TRUCK_ID ?? '651692e8-374b-401f-9b9f-e3ed86342ab5';
 const ALERT_LANG = process.env.ALERT_LANG ?? 'as';
 
