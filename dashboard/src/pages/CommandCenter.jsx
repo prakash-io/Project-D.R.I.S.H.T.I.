@@ -19,6 +19,8 @@ import IncidentPanel from '../components/IncidentPanel';
 import ControlBar from '../components/ControlBar';
 import DemoSidebar from '../components/DemoSidebar';
 import ErrorBoundary from '../components/ErrorBoundary';
+import FleetLegend from '../components/FleetLegend';
+import { truckHex } from '../lib/truckColors';
 
 export default function CommandCenter({
   trucks, connected, packets,
@@ -83,6 +85,17 @@ export default function CommandCenter({
               />
             </ErrorBoundary>
 
+            {/* The key to the per-truck colours the layers now draw. Only
+                mounted when the truck layer is on -- a legend for symbols
+                that are hidden explains nothing. */}
+            {showTrucks && (
+              <FleetLegend
+                trucks={trucks}
+                selectedId={selectedTruck?.truck_id}
+                onSelect={setSelectedTruck}
+              />
+            )}
+
             {selectedTruck && (
               <div className="absolute bottom-4 left-4 w-[248px] border border-edge
                               bg-panel/95 backdrop-blur">
@@ -90,9 +103,19 @@ export default function CommandCenter({
                     position is a fix or an estimate is the whole product. */}
                 <div className={`flex items-center justify-between px-3 py-1.5
                                  ${dr ? 'bg-warn/15' : 'bg-live/15'}`}>
-                  <span className={`font-mono text-[10px] uppercase tracking-term
-                                    ${dr ? 'text-warn' : 'text-live'}`}>
-                    {dr ? 'Dead Reckoning' : 'GNSS Fix'}
+                  <span className="flex min-w-0 items-center gap-2">
+                    {/* This truck's own colour, from the same function the
+                        map layer uses. The card is opened by clicking a
+                        marker, so it has to agree with the thing clicked. */}
+                    <span
+                      aria-hidden
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: truckHex(selectedTruck.truck_id) }}
+                    />
+                    <span className={`font-mono text-[10px] uppercase tracking-term
+                                      ${dr ? 'text-warn' : 'text-live'}`}>
+                      {dr ? 'Dead Reckoning' : 'GNSS Fix'}
+                    </span>
                   </span>
                   <button
                     type="button"

@@ -13,7 +13,6 @@ import RNFS from 'react-native-fs';
 import MapCanvas from './src/ui/MapCanvas';
 import ErrorBoundary from './src/ui/ErrorBoundary';
 import MapControls from './src/ui/MapControls';
-import CorridorPicker from './src/ui/CorridorPicker';
 import SpeedCard from './src/ui/SpeedCard';
 import HudScreen from './src/ui/HudScreen';
 import HazardScreen from './src/ui/HazardScreen';
@@ -26,7 +25,6 @@ import RoutePlanner, { HERE } from './src/ui/RoutePlanner';
 import SourceToggle from './src/ui/SourceToggle';
 import TabBar from './src/ui/TabBar';
 import Button from './src/ui/Button';
-import { Card, Stat } from './src/ui/Card';
 import { t } from './src/ui/tokens';
 
 import { createDatabase } from './src/db';
@@ -39,7 +37,7 @@ import { queueHazard, drainHazards, pendingHazardCount } from './src/services/ha
 import { ensureEdgeAssets } from './src/services/edgeAssets';
 import { refreshRouteHazards, cachedHazards, toFeatureCollection } from './src/services/hazards';
 import { speakAlert } from './src/services/voiceAlert';
-import { listCorridors, getCorridor, ensureTrip } from './src/services/corridors';
+import { getCorridor, ensureTrip } from './src/services/corridors';
 import { listPlaces, planTrip, ackReroute, routeCoordinates }
   from './src/services/routePlanner';
 
@@ -100,7 +98,6 @@ export default function App() {
   const [places, setPlaces] = useState([]);
   const [origin, setOrigin] = useState(null);
   const [destination, setDestination] = useState(null);
-  const [plannerOpen, setPlannerOpen] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [planError, setPlanError] = useState(null);
   /// A reroute the backend has OFFERED and the driver has not answered.
@@ -108,16 +105,20 @@ export default function App() {
   /// map keeps the road the driver chose until they tap Accept.
   const [proposal, setProposal] = useState(null);
   const [answering, setAnswering] = useState(false);
-  const [corridors, setCorridors] = useState([]);
-  const [corridorId, setCorridorId] = useState(SIM_CORRIDOR);
+  // The demonstration corridor is a launch constant again, not a rail of
+  // tiles the driver picks from. The Source/Destination card at the top of the
+  // map does that job now over the whole road graph -- every corridor the rail
+  // could offer is a pair of places in that list, and the planner reaches the
+  // ones it never held as well. `activeCorridor` survives because SourceToggle
+  // names what the demo segment is driving.
   const activeCorridor = useRef(null);
-  const [corridorBusy, setCorridorBusy] = useState(null);
   // Measured, not assumed. The map control rail used to sit at a fixed 36%
-  // from the top, which cleared the stat cards but not the corridor picker
-  // added above them -- the RECENTER button ended up behind the card, and
-  // recenter is the one control a driver needs when the camera is not on the
-  // truck. Anchoring to the real height of the bottom stack means the rail
-  // stays clear whatever that stack grows to hold.
+  // from the top, and every time the bottom stack grew the RECENTER button
+  // ended up behind a card -- recenter being the one control a driver needs
+  // precisely when the camera is not on the truck. Anchoring to the real
+  // height of the bottom stack means the rail stays clear whatever that stack
+  // holds, which is what let the stack be rebuilt for this layout without
+  // re-tuning a percentage.
   const [bottomH, setBottomH] = useState(0);
   const [picking, setPicking] = useState(false);
   const [linkUp, setLinkUp] = useState(false);
@@ -368,18 +369,10 @@ export default function App() {
           'No destinations available yet — the list will load when dispatch is reachable.');
       }
 
-      // The corridor LIST is metadata only, ~3 KB, so it is fetched whatever
-      // the source: the picker has to be populated the moment the driver
-      // switches to the demonstration drive. The GEOMETRY is not -- one
-      // corridor runs to thousands of coordinates, and there is no reason to
-      // pull it on a session that never leaves real GNSS.
-      const list = await listCorridors(API_URL);
-      if (!disposed) setCorridors(list);
-
       let simulate = null;
       if (SIM_DRIVE) {
         try {
-          const corridor = await getCorridor(API_URL, corridorId);
+          const corridor = await getCorridor(API_URL, SIM_CORRIDOR);
           activeCorridor.current = corridor;
           const coordinates = corridor?.geometry?.coordinates ?? [];
           if (coordinates.length >= 2) {
@@ -541,7 +534,6 @@ export default function App() {
       // abandoned. Leaving it up would let them accept a detour around a
       // hazard that is no longer on their way.
       setProposal(null);
-      setPlannerOpen(false);
       log('INFO', 'ROUTE_PLANNED',
         `${from.name} → ${to.name}: ${(planned.distanceM / 1000).toFixed(1)} km`
         + (Number.isFinite(planned.durationSec)
@@ -569,7 +561,7 @@ export default function App() {
       return;
     }
     if (tracker.current.setSimulated(next) === false) {
-      setAlert('Plan a route or pick a corridor first — there is nothing to drive.');
+      setAlert('Set a source and destination first — there is nothing to drive.');
       return;
     }
     setIsSimulated(next);
@@ -635,50 +627,6 @@ export default function App() {
   /// Ask the model for hazards along a route and cache them. Never throws:
   /// a failed refresh leaves the previous warnings in place, because "no
   /// hazards" and "could not ask" must not look the same.
-  /**
-   * Change the demonstration corridor without restarting the app.
-   *
-   * The route the map draws and the route the truck drives are set from the
-   * SAME geometry here, so they cannot disagree -- a picker that redrew the
-   * line without moving the truck would be a worse lie than no picker.
-   */
-  const switchCorridor = async (id) => {
-    if (!id || id === corridorId || corridorBusy) return;
-    setCorridorBusy(id);
-    try {
-      const corridor = await getCorridor(API_URL, id);
-      const coordinates = corridor?.geometry?.coordinates ?? [];
-      if (coordinates.length < 2) throw new Error('corridor has no geometry');
-
-      activeCorridor.current = corridor;
-      setCorridorId(id);
-      // A corridor is costed by the server, but /routes/corridors carries only
-      // its distance -- there is no stored ETA for it -- so the summary card
-      // is given the distance and left honest about the missing duration
-      // rather than shown a number this client invented.
-      applyRoute(coordinates, { distanceM: corridor.distance_m, rerouted: false });
-      setOrigin(asPlace(places, corridor.origin_name,
-        corridor.origin_lat, corridor.origin_lng));
-      setDestination(asPlace(places, corridor.destination_name,
-        corridor.destination_lat, corridor.destination_lng));
-      // A corridor change replaces the road; an offer against the road it
-      // replaced is no longer a question the driver can answer.
-      setProposal(null);
-
-      try {
-        await ensureTrip(API_URL, TRUCK_ID, corridor);
-      } catch (error) {
-        log('WARN', 'TRIP_FAIL', `No active trip: ${error.message}`);
-      }
-      log('INFO', 'CORRIDOR', `Now driving ${corridor.name} — `
-        + `${(corridor.distance_m / 1000).toFixed(1)} km.`);
-    } catch (error) {
-      log('ERR', 'CORRIDOR_FAIL', `Could not load corridor: ${error.message}`);
-    } finally {
-      setCorridorBusy(null);
-    }
-  };
-
   const refreshHazards = async (coordinates) => {
     if (!database.current) return;
     const result = await refreshRouteHazards(database.current, {
@@ -735,9 +683,6 @@ export default function App() {
     }
   };
 
-  const heading = fix?.heading ?? fix?.heading_deg ?? fix?.headingDeg;
-  const altitude = fix?.altitude ?? fix?.altitude_m;
-
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
@@ -775,13 +720,38 @@ export default function App() {
             hazards={hazards}
             forecast={toFeatureCollection(forecast)}
             zoom={zoom} follow={follow} followKey={followKey}
+            // Labels for the two route-end markers. The POSITIONS come from
+            // the geometry itself inside MapCanvas -- these are only the
+            // names, because a coordinate does not carry one.
+            originName={origin?.name}
+            destinationName={destination?.name}
             // A drag, pinch or rotate hands the viewport to the driver. The
             // recentre button below is the only way back, which is the
             // Google Maps contract and the one drivers already expect.
             onUserPan={stopFollowing}
           >
+            {/* Source and destination, at the top of the screen. This is
+                the Google Maps position and it is here for the Google Maps
+                reason: it is the first control a parked driver reaches for and
+                the one a moving driver ignores. It replaces the collapsed
+                "Where to?" pill that used to sit at the bottom of the stack
+                below. box-none so the map still takes a drag everywhere the
+                card itself is not. */}
             <View style={styles.mapTop} pointerEvents="box-none">
-              <SpeedCard fix={fix} mode={mode} ageMs={fixAge} />
+              <RoutePlanner
+                places={places}
+                origin={origin}
+                destination={destination}
+                hasFix={Boolean(fix)}
+                planning={planning}
+                error={planError}
+                onChange={(field, place) => {
+                  if (field === 'origin') setOrigin(place); else setDestination(place);
+                }}
+                onSwap={() => { setOrigin(destination); setDestination(origin); }}
+                onPlan={planRoute}
+                onClearError={() => setPlanError(null)}
+              />
             </View>
 
             <MapControls
@@ -798,31 +768,20 @@ export default function App() {
               pointerEvents="box-none"
               onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}
             >
-              {/* Distance and ETA for the active route. Sits above the
-                  corridor picker so the driver's eye lands on it first, and
-                  inside mapBottom so MapControls keeps clearing the stack. */}
+              {/* Speed, bottom-left, which is where every navigator puts it
+                  and therefore where the driver's eye already goes. Compact:
+                  the mode pill under it appears only when the mode is worth
+                  interrupting for -- see SpeedCard. */}
+              <SpeedCard fix={fix} mode={mode} ageMs={fixAge} compact
+                         style={styles.speed} />
+
+              {/* Distance and ETA for the active route -- the navigation band.
+                  Inside mapBottom so MapControls keeps clearing the stack. */}
               <RouteSummary
                 distanceM={routeEta?.distanceM}
                 durationSec={routeEta?.durationSec}
                 rerouted={routeEta?.rerouted}
                 style={styles.routeSummary}
-              />
-
-              <RoutePlanner
-                places={places}
-                origin={origin}
-                destination={destination}
-                hasFix={Boolean(fix)}
-                open={plannerOpen}
-                onOpenChange={setPlannerOpen}
-                planning={planning}
-                error={planError}
-                onChange={(field, place) => {
-                  if (field === 'origin') setOrigin(place); else setDestination(place);
-                }}
-                onSwap={() => { setOrigin(destination); setDestination(origin); }}
-                onPlan={planRoute}
-                onClearError={() => setPlanError(null)}
               />
 
               <SourceToggle
@@ -833,35 +792,6 @@ export default function App() {
                   ? `${origin.name} → ${destination.name}`
                   : (activeCorridor.current?.name ?? null)}
               />
-
-              {/* The corridor rail and the instrument cards step aside while
-                  the planner is open. Both stacks are useful and neither is
-                  urgent, and on a small handset all four at once pushes the
-                  hazard button off the bottom of the screen -- which is the
-                  one control that must never be unreachable. */}
-              {!plannerOpen ? (
-                <>
-                  {isSimulated ? (
-                    <CorridorPicker
-                      corridors={corridors}
-                      activeId={corridorId}
-                      busy={corridorBusy}
-                      onSelect={switchCorridor}
-                    />
-                  ) : null}
-
-                  <View style={styles.statRow}>
-                    <Card style={styles.statCard}>
-                      <Stat label="BEARING" unit="°"
-                            value={Number.isFinite(heading) ? pad3(heading) : '—'} />
-                    </Card>
-                    <Card style={[styles.statCard, styles.statCardRight]}>
-                      <Stat label="ALTITUDE" unit="m"
-                            value={Number.isFinite(altitude) ? Math.round(altitude) : '—'} />
-                    </Card>
-                  </View>
-                </>
-              ) : null}
 
               <Button
                 label="Report Hazard"
@@ -955,11 +885,6 @@ function hazardSentence(payload) {
   return `Warning: ${noun} reported ahead. Slow down and proceed with caution.`;
 }
 
-/// 007°, not 7° — a bearing is always three digits on an instrument.
-function pad3(n) {
-  return String(Math.round(n)).padStart(3, '0');
-}
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: t.color.bgBase },
   header: {
@@ -980,12 +905,10 @@ const styles = StyleSheet.create({
     position: 'absolute', top: t.space.md, left: t.space.lg, right: t.space.lg,
   },
   mapControls: { position: 'absolute', right: t.space.lg },
+  speed: { marginBottom: t.space.md },
   routeSummary: { marginHorizontal: 0 },
   mapBottom: {
     position: 'absolute', left: t.space.lg, right: t.space.lg, bottom: t.space.md,
   },
-  statRow: { flexDirection: 'row', marginBottom: t.space.md },
-  statCard: { flex: 1, paddingVertical: t.space.md },
-  statCardRight: { marginLeft: t.space.md },
   tabWrap: { paddingBottom: t.space.md, paddingTop: t.space.sm },
 });

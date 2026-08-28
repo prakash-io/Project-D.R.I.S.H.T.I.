@@ -1,13 +1,25 @@
-// Analytics — network risk and fleet composition.
+// Analytics — network risk, fleet composition, and the way into one truck.
 //
 // The 3D chart here is Three.js. That is a deliberate boundary: three.js draws
 // the console's own instruments (this chart, the navigation mark) and never
 // anything geographic. The map is deck.gl over MapLibre and stays that way --
 // one renderer owns the projection, the picking, and the CSS inversion that
 // index.css scopes so carefully to the basemap canvas alone.
+//
+// -------------------------------------------------------------- the layout
+//
+// The rightmost column is the ACTIONABLE one: pick a truck, or read the
+// segments that are about to become somebody's problem. The left column is
+// standing context -- how big is the fleet, and what should every number on
+// this page be read against. That is why the risk panel moved right and the
+// truck selector sits above it: a dispatcher arriving here is choosing what to
+// look at next, and both of those columns' worth of choosing now live in one
+// place instead of on opposite sides of the screen.
 import React, { useMemo } from 'react';
 import RiskBars3D from '../components/RiskBars3D';
 import ErrorBoundary from '../components/ErrorBoundary';
+import TruckSelector from '../components/TruckSelector';
+import FleetTable from '../components/FleetTable';
 
 function Panel({ title, hint, children }) {
   return (
@@ -25,7 +37,10 @@ function Panel({ title, hint, children }) {
   );
 }
 
-export default function Analytics({ features, riskLoading, threshold, trucks, corridors }) {
+export default function Analytics({
+  features, riskLoading, threshold, trucks, corridors,
+  fleet, fleetLoading, fleetError,
+}) {
   // The chart plots the worst segments, named by road. Unnamed edges are
   // labelled by id rather than dropped: an unnamed track carrying a 0.97 is
   // exactly the segment a dispatcher needs to see, and silently omitting it
@@ -33,7 +48,10 @@ export default function Analytics({ features, riskLoading, threshold, trucks, co
   const bars = useMemo(() => (
     [...features]
       .sort((a, b) => b.properties.risk_score - a.properties.risk_score)
-      .slice(0, 14)
+      // Ten rather than fourteen. The panel is in a narrower column now, and
+      // a 3D bar chart that has to be dragged to separate two bars has stopped
+      // ranking anything.
+      .slice(0, 10)
       .map((f) => ({
         // The edge id, not the name, is the identity. Road names repeat
         // heavily in the extract -- a single highway is hundreds of edges all
@@ -61,14 +79,61 @@ export default function Analytics({ features, riskLoading, threshold, trucks, co
         </p>
       </header>
 
-      <div className="grid gap-4 p-5 xl:grid-cols-3">
-        <div className="xl:col-span-2">
+      <div className="grid gap-4 p-5 xl:grid-cols-12">
+        {/* ------------------------------------------- left: standing context */}
+        <div className="flex flex-col gap-4 xl:col-span-7">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <Tile label="Units reporting" value={trucks.length} />
+            {/* The same split the map encodes. A console that shows a fleet
+                count without this hides the one distinction the platform
+                exists to make. */}
+            <Tile label="On GNSS fix" value={gnss} tone="text-live" />
+            <Tile label="Dead reckoning" value={deadReckoned} tone="text-warn" />
+            <Tile label="Planned corridors" value={corridors.length} />
+          </div>
+
+          <FleetTable fleet={fleet} loading={fleetLoading} error={fleetError} />
+
+          <Panel
+            title="MODEL PROVENANCE"
+            hint="Read every figure on this page against this"
+          >
+            <ul className="space-y-2.5">
+              <Note>
+                Hazard labels are <strong className="text-phosphor">synthetic</strong>.
+                This is a demonstrator, and the probabilities are not
+                forecasting skill.
+              </Note>
+              <Note>
+                Rainfall is located by <code className="text-phosphor">hourly.time</code>,
+                never sliced from index 0 — the series starts at 00:00 UTC.
+              </Note>
+              <Note>
+                Routing is bidirectional: the extract carries no
+                <code className="text-phosphor"> oneway</code> column.
+              </Note>
+              <Note>
+                Each truck's colour is derived from its id, so the swatch in the
+                selector is the colour the map draws that vehicle in.
+              </Note>
+            </ul>
+          </Panel>
+        </div>
+
+        {/* -------------------------------------- right: what to look at next */}
+        <div className="flex flex-col gap-4 xl:col-span-5">
+          <TruckSelector
+            fleet={fleet}
+            loading={fleetLoading}
+            error={fleetError}
+          />
+
           <Panel
             title="HIGHEST-RISK SEGMENTS"
             hint={riskLoading
               ? 'Scoring…'
               : `Top ${bars.length} of ${features.length} segments at or above `
-                + `${(threshold * 100).toFixed(0)}%. Drag to inspect; hover to read a value.`}
+                + `${(threshold * 100).toFixed(0)}%. Drag to inspect.`}
           >
             {/* A decorative-but-informative canvas. If WebGL is unavailable
                 the boundary keeps the rest of the page -- including the exact
@@ -76,12 +141,12 @@ export default function Analytics({ features, riskLoading, threshold, trucks, co
             <ErrorBoundary
               label="3D chart"
               fallback={
-                <div className="grid h-[300px] place-items-center border border-edge">
+                <div className="grid h-[220px] place-items-center border border-edge">
                   <p className="meta">3D chart unavailable — values listed below</p>
                 </div>
               }
             >
-              <RiskBars3D items={bars} threshold={threshold} height={300} />
+              <RiskBars3D items={bars} threshold={threshold} height={220} />
             </ErrorBoundary>
 
             {/* The chart ranks; this states. Never only the canvas: a reader
@@ -112,51 +177,18 @@ export default function Analytics({ features, riskLoading, threshold, trucks, co
             </ol>
           </Panel>
         </div>
-
-        <div className="flex flex-col gap-4">
-          <Panel title="FLEET" hint="Live, from the telemetry socket">
-            <dl className="divide-y divide-edge/60">
-              <Row label="Units reporting" value={trucks.length} />
-              {/* The same split the map encodes in blue and amber. A console
-                  that shows a fleet count without this split hides the one
-                  distinction the platform exists to make. */}
-              <Row label="On GNSS fix" value={gnss} tone="text-live" />
-              <Row label="Dead reckoning" value={deadReckoned} tone="text-warn" />
-              <Row label="Planned corridors" value={corridors.length} />
-            </dl>
-          </Panel>
-
-          <Panel
-            title="MODEL PROVENANCE"
-            hint="Read every figure on this page against this"
-          >
-            <ul className="space-y-2.5">
-              <Note>
-                Hazard labels are <strong className="text-phosphor">synthetic</strong>.
-                This is a demonstrator, and the probabilities are not
-                forecasting skill.
-              </Note>
-              <Note>
-                Rainfall is located by <code className="text-phosphor">hourly.time</code>,
-                never sliced from index 0 — the series starts at 00:00 UTC.
-              </Note>
-              <Note>
-                Routing is bidirectional: the extract carries no
-                <code className="text-phosphor"> oneway</code> column.
-              </Note>
-            </ul>
-          </Panel>
-        </div>
       </div>
     </div>
   );
 }
 
-function Row({ label, value, tone = 'text-phosphor' }) {
+/// A single figure. Replaces the stacked <dl> the fleet panel used, because
+/// four numbers in a row is a scan and four numbers in a column is a read.
+function Tile({ label, value, tone = 'text-phosphor' }) {
   return (
-    <div className="flex items-center justify-between py-2">
-      <dt className="meta">{label}</dt>
-      <dd className={`font-mono text-[15px] ${tone}`}>{value}</dd>
+    <div className="border border-edge bg-panel/60 p-3">
+      <p className="meta truncate">{label}</p>
+      <p className={`mt-1.5 font-mono text-[22px] tabular-nums ${tone}`}>{value}</p>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { ScenegraphLayer } from '@deck.gl/mesh-layers';
 import Map from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { BASEMAP_STYLE, INITIAL_VIEW_STATE } from '../lib/mapStyle';
+import { truckRgb } from '../lib/truckColors';
 
 /// Served from public/, built by scripts/gen_truck_gltf.mjs. Not fetched from
 /// a model CDN: this console must come up with no third-party request, the
@@ -137,10 +138,21 @@ export default function MapView({
         id: 'trucks',
         data: trucks,
         getPosition: (d) => d.position,
-        // Amber for dead-reckoned, blue for a real GNSS fix. The distinction
-        // is the whole product.
-        getFillColor: (d) => (d.source === 'ekf' ? [210, 153, 34] : [88, 166, 255]),
-        getLineColor: [13, 17, 23],
+        // FILL = which truck. One colour per truck id, from lib/truckColors,
+        // which is the same function the 3D model, the fleet legend and the
+        // analytics truck selector call. A dispatcher matching a swatch to a
+        // vehicle has to be matching against one decision, not four.
+        getFillColor: (d) => truckRgb(d.truck_id),
+        // STROKE = how we know where it is. This is where the GNSS/dead-
+        // reckoning distinction went when identity took the fill, and it is
+        // not a demotion: an amber ring on a coloured dot is more legible
+        // against this substrate than the old amber fill was, because the
+        // ring sits against the fill rather than against the basemap.
+        //
+        // Dead-reckoned trucks also carry the uncertainty halo below, so the
+        // distinction survives on two channels, neither of which is hue --
+        // which is what makes it readable to a colour-blind dispatcher.
+        getLineColor: (d) => (d.source === 'ekf' ? [210, 153, 34] : [13, 17, 23]),
         lineWidthMinPixels: 2,
         stroked: true,
         radiusUnits: 'pixels',
@@ -150,7 +162,14 @@ export default function MapView({
         // deck.gl memoises layer data by reference; without this the markers
         // would only redraw when the array identity changed, which is once a
         // second -- undoing the interpolation entirely.
-        updateTriggers: { getPosition: trucks },
+        updateTriggers: {
+          getPosition: trucks,
+          // Listed because a truck that flips to dead reckoning changes its
+          // stroke without changing the array identity, so the ring would
+          // otherwise stay the substrate colour until the next remount.
+          getLineColor: trucks,
+          getFillColor: trucks,
+        },
       }));
 
       // The 3D vehicle (WEB-03). deck.gl's ScenegraphLayer, NOT three.js --
@@ -181,8 +200,17 @@ export default function MapView({
         // the scene's counter-clockwise yaw.
         getOrientation: (d) => [0, -(d.heading ?? 0), 90],
         // Tint, not texture. The model ships near-white specifically so this
-        // multiply lands cleanly -- see scripts/gen_truck_gltf.mjs.
-        getColor: (d) => (d.source === 'ekf' ? [210, 153, 34] : [88, 166, 255]),
+        // multiply lands cleanly -- see scripts/gen_truck_gltf.mjs. That
+        // near-white base is load-bearing for the per-truck colouring: the
+        // accessor MULTIPLIES, so a mid-grey mesh would pull every hue toward
+        // the same muddy centre and undo the separation.
+        //
+        // Identity, matching the 2D dot underneath it exactly -- both call
+        // truckRgb. The model was previously one of two colours for the whole
+        // fleet, so three trucks converging on a junction were three
+        // identical silhouettes and the only way to tell them apart was to
+        // click each one.
+        getColor: (d) => truckRgb(d.truck_id),
         // Metres. The model is ~4.7 units nose to tail, so this renders a
         // vehicle about 14 m long: legible when a dispatcher zooms to a
         // junction, and honest about the footprint of a goods truck.

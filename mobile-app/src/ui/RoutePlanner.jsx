@@ -1,9 +1,16 @@
-// Where am I going: the origin/destination card (workflow §1, driver side).
+// Where am I going: the Source/Destination card at the TOP of the map screen.
 //
-// Collapsed it is a single "Where to?" pill, because 95% of the time the
-// driver wants the map, not the form. Expanded it is the two-field stack every
-// navigator uses -- origin dot, destination pin, a swap between them -- so
-// there is nothing to learn.
+// This is the Google Maps directions header, and it is at the top for the
+// reason Google put it there: it is the first thing a driver touches and the
+// last thing they need once moving, so it belongs where the thumb reaches
+// while parked and the eye ignores at speed. It used to be a collapsed
+// "Where to?" pill at the BOTTOM, stacked under the ETA band and over a rail
+// of corridor tiles -- which meant the two most important controls on the
+// screen were the two hardest to find.
+//
+// Both fields are always visible now. Collapsing them saved about 90 pt of map
+// and cost the driver the answer to "where does this app think I am going",
+// which is the question the whole screen exists to answer.
 //
 // The fields are pressable rather than free-text on purpose. Typing happens
 // inside PlacePicker, over a list of places the road graph provably reaches;
@@ -14,15 +21,14 @@ import React, { useState } from 'react';
 import { View, Text, Pressable, ActivityIndicator, StyleSheet } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import PlacePicker, { HERE } from './PlacePicker';
-import Button from './Button';
 import { t } from './tokens';
 
 /**
  * @param places        [{ id, name, lat, lng }] from GET /routes/places
- * @param origin        chosen origin, or null
+ * @param origin        chosen source, or null
  * @param destination   chosen destination, or null
- * @param hasFix        offer "My location" as an origin
- * @param planning      a plan is in flight -- the Go button spins
+ * @param hasFix        offer "My location" as a source
+ * @param planning      a plan is in flight -- the action row spins
  * @param error         last planning failure, shown in the card
  * @param onChange      (field, place) => void   field is 'origin'|'destination'
  * @param onSwap        () => void
@@ -31,13 +37,8 @@ import { t } from './tokens';
  */
 export default function RoutePlanner({
   places, origin, destination, hasFix, planning, error,
-  open, onOpenChange, onChange, onSwap, onPlan, onClearError, style,
+  onChange, onSwap, onPlan, onClearError, style,
 }) {
-  // Open state is CONTROLLED. The screen behind this card has to make room
-  // for it -- the stat cards and the corridor rail step aside while the form
-  // is up -- and a component that owned its own open flag could not tell them
-  // to. See App.jsx's mapBottom stack.
-  const setOpen = onOpenChange ?? (() => {});
   // Which field the picker is filling, or null when it is closed. One picker
   // serving both fields rather than two mounted modals: only one can ever be
   // on screen, and two would be two places for the filter state to diverge.
@@ -45,60 +46,31 @@ export default function RoutePlanner({
 
   const ready = Boolean(origin && destination && origin.id !== destination.id);
 
-  if (!open) {
-    return (
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={({ pressed }) => [
-          styles.collapsed, t.shadow.card, pressed && styles.collapsedPressed, style,
-        ]}
-        accessibilityRole="button"
-        accessibilityLabel={destination
-          ? `Route to ${destination.name}. Change route`
-          : 'Set origin and destination'}
-      >
-        <Icon name="search" size={20} color={t.color.textMuted}
-              importantForAccessibility="no" />
-        <Text style={styles.collapsedLabel} numberOfLines={1}>
-          {destination ? `To ${destination.name}` : 'Where to?'}
-        </Text>
-        <Icon name="expand-less" size={22} color={t.color.textMuted}
-              importantForAccessibility="no" />
-      </Pressable>
-    );
-  }
-
   return (
     <View style={[styles.card, t.shadow.card, style]}>
-      <View style={styles.head}>
-        <Text style={styles.heading} accessibilityRole="header">Plan route</Text>
-        <Pressable
-          onPress={() => setOpen(false)}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-          accessibilityRole="button"
-          accessibilityLabel="Hide route planner"
-        >
-          <Icon name="expand-more" size={24} color={t.color.textMuted} />
-        </Pressable>
-      </View>
-
       <View style={styles.fields}>
         <View style={styles.fieldStack}>
           <Field
             icon="trip-origin"
-            tone={t.color.textMuted}
-            label="From"
+            tone={t.color.routeStart}
+            label="Source"
             place={origin}
             placeholder="Choose a starting point"
             onPress={() => { onClearError?.(); setPicking('origin'); }}
           />
           {/* The connector every navigator draws between the two ends. Purely
-              decorative, and hidden from the screen reader for that reason. */}
-          <View style={styles.connector} importantForAccessibility="no" />
+              decorative, and hidden from the screen reader for that reason.
+              Dotted rather than a solid rule: it stands in for the road, and
+              the road is not known until the route has been planned. */}
+          <View style={styles.connector} importantForAccessibility="no">
+            <View style={styles.connectorDot} />
+            <View style={styles.connectorDot} />
+            <View style={styles.connectorDot} />
+          </View>
           <Field
             icon="place"
-            tone={t.color.accent}
-            label="To"
+            tone={t.color.routeEnd}
+            label="Destination"
             place={destination}
             placeholder="Choose a destination"
             onPress={() => { onClearError?.(); setPicking('destination'); }}
@@ -111,7 +83,7 @@ export default function RoutePlanner({
           style={({ pressed }) => [styles.swap, pressed && styles.swapPressed]}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           accessibilityRole="button"
-          accessibilityLabel="Swap origin and destination"
+          accessibilityLabel="Swap source and destination"
         >
           <Icon name="swap-vert" size={22} color={t.color.textSecondary} />
         </Pressable>
@@ -127,32 +99,50 @@ export default function RoutePlanner({
 
       {planning ? (
         <View style={styles.planning} accessibilityLiveRegion="polite">
-          <ActivityIndicator size="small" color={t.color.accent} />
+          <ActivityIndicator size="small" color={t.color.routeLine} />
           <Text style={styles.planningText}>
             Planning over the road network — a long route can take a minute.
           </Text>
         </View>
       ) : (
-        <Button
-          label="Get directions"
-          icon="directions"
-          size="md"
+        // Deliberately NOT the shared Button: that one is the orange primary
+        // action, and orange is the hazard-report colour on this screen. The
+        // directions action is blue because the line it draws is blue, and
+        // that correspondence is the only legend either of them gets.
+        <Pressable
           onPress={onPlan}
           disabled={!ready}
-          style={styles.go}
+          style={({ pressed }) => [
+            styles.go,
+            pressed && ready && styles.goPressed,
+            !ready && styles.goDisabled,
+          ]}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: !ready }}
+          accessibilityLabel="Get directions"
           accessibilityHint={ready
             ? 'Plans the route and starts the trip'
             : 'Choose two different places first'}
-        />
+        >
+          <Icon
+            name="directions"
+            size={18}
+            color={ready ? t.color.onAccent : t.color.textMuted}
+            importantForAccessibility="no"
+          />
+          <Text style={[styles.goLabel, !ready && styles.goLabelDisabled]}>
+            Get directions
+          </Text>
+        </Pressable>
       )}
 
       <PlacePicker
         visible={picking !== null}
-        title={picking === 'origin' ? 'Choose origin' : 'Choose destination'}
+        title={picking === 'origin' ? 'Choose source' : 'Choose destination'}
         places={places}
         selectedId={picking === 'origin' ? origin?.id : destination?.id}
         excludeId={picking === 'origin' ? destination?.id : origin?.id}
-        // "My location" is an origin only. Routing TO wherever the truck
+        // "My location" is a source only. Routing TO wherever the truck
         // happens to be is not a journey.
         allowHere={picking === 'origin' && hasFix}
         onSelect={(place) => { onChange?.(picking, place); setPicking(null); }}
@@ -190,33 +180,10 @@ function Field({ icon, tone, label, place, placeholder, onPress }) {
 export { HERE };
 
 const styles = StyleSheet.create({
-  collapsed: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: t.color.bgPanel,
-    borderRadius: t.radius.pill,
-    minHeight: t.touchMin,
-    paddingHorizontal: t.space.lg,
-    marginBottom: t.space.md,
-  },
-  collapsedPressed: { backgroundColor: t.color.bgInset },
-  collapsedLabel: {
-    flex: 1,
-    fontFamily: t.font.sansMedium, fontSize: t.type.body, color: t.color.textPrimary,
-    marginHorizontal: t.space.md,
-  },
   card: {
     backgroundColor: t.color.bgPanel,
     borderRadius: t.radius.card,
-    padding: t.space.lg,
-    marginBottom: t.space.md,
-  },
-  head: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: t.space.sm,
-  },
-  heading: {
-    fontFamily: t.font.sansMedium, fontSize: t.type.micro, fontWeight: '700',
-    letterSpacing: 1.1, color: t.color.textMuted,
+    padding: t.space.md,
   },
   fields: { flexDirection: 'row', alignItems: 'center' },
   fieldStack: { flex: 1 },
@@ -237,9 +204,14 @@ const styles = StyleSheet.create({
   },
   fieldPlaceholder: { fontFamily: t.font.sans, color: t.color.textMuted },
   connector: {
-    width: t.hairline, height: 12,
+    height: 14, justifyContent: 'space-between',
+    // Lines up with the centre of the 18 pt field icons above and below it:
+    // field padding (8) + half the icon (9) - half the dot (1.5).
+    marginLeft: t.space.sm + 7.5,
+  },
+  connectorDot: {
+    width: 3, height: 3, borderRadius: 1.5,
     backgroundColor: t.color.border,
-    marginLeft: t.space.sm + 8,
   },
   swap: {
     width: t.touchMin, height: t.touchMin,
@@ -247,10 +219,24 @@ const styles = StyleSheet.create({
     borderRadius: t.radius.pill,
   },
   swapPressed: { backgroundColor: t.color.bgInset },
-  go: { marginTop: t.space.md },
+  go: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    minHeight: t.touchMin,
+    borderRadius: t.radius.pill,
+    backgroundColor: t.color.routeLine,
+    marginTop: t.space.sm,
+  },
+  goPressed: { backgroundColor: t.color.routeCasing },
+  goDisabled: { backgroundColor: t.color.bgInset },
+  goLabel: {
+    fontFamily: t.font.sansMedium, fontSize: t.type.body, fontWeight: '700',
+    color: t.color.onAccent, marginLeft: t.space.sm,
+  },
+  goLabelDisabled: { color: t.color.textMuted },
   planning: {
     flexDirection: 'row', alignItems: 'center',
-    marginTop: t.space.md, paddingVertical: t.space.sm,
+    marginTop: t.space.sm, paddingVertical: t.space.sm,
+    paddingHorizontal: t.space.sm,
   },
   planningText: {
     flex: 1,
@@ -262,7 +248,7 @@ const styles = StyleSheet.create({
     backgroundColor: t.color.alertWash,
     borderRadius: t.radius.chip,
     padding: t.space.md,
-    marginTop: t.space.md,
+    marginTop: t.space.sm,
   },
   errorText: {
     flex: 1,

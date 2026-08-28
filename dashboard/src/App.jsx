@@ -11,19 +11,22 @@
 // The cost of this shape is prop drilling into the pages, which is preferred
 // here to a context: there are three consumers and one owner, and a context
 // would hide exactly which page depends on which feed.
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import NavBar from './components/NavBar';
 import ErrorBoundary from './components/ErrorBoundary';
 import CommandCenter from './pages/CommandCenter';
 import WeatherAlerts from './pages/WeatherAlerts';
 import Analytics from './pages/Analytics';
+import TruckAnalytics from './pages/TruckAnalytics';
 import { useTelemetry } from './hooks/useTelemetry';
 import { useIncidents } from './hooks/useIncidents';
 import { useRiskSegments } from './hooks/useRiskSegments';
 import { useCorridors } from './hooks/useCorridors';
 import { useDemoRoute } from './hooks/useDemoRoute';
 import { useHazardAlerts } from './hooks/useHazardAlerts';
+import { useFleetRoster } from './hooks/useFleetRoster';
+import { assignFleetColors } from './lib/truckColors';
 
 const RISK_THRESHOLD = 0.85;
 
@@ -59,6 +62,20 @@ export default function App() {
   // ten requests every five minutes, which is well inside what the model
   // service absorbs, and the hook keeps its own in-flight guard.
   const hazard = useHazardAlerts({ corridors, threshold: RISK_THRESHOLD });
+
+  // The roster lives here, not on the analytics page, because the COLOUR
+  // ASSIGNMENT below has to see every truck. Resolved against the live list
+  // alone, the map would assign colours over the two or three vehicles that
+  // happen to be emitting, and a fourth coming online could take a hue that
+  // was already on screen -- so two trucks would briefly be one colour, which
+  // is the exact failure the assignment exists to prevent.
+  const { fleet, loading: fleetLoading, error: fleetError } = useFleetRoster(trucks);
+
+  // One assignment for the whole console, recomputed only when the SET of
+  // trucks changes. Everything that draws a truck -- the deck.gl model, the 2D
+  // dot, the fleet key, the selector, the fleet table, the deep-dive header --
+  // reads the result through truckRgb/truckHex, so they cannot disagree.
+  useMemo(() => assignFleetColors(fleet.map((t) => t.id)), [fleet]);
 
   return (
     // `grain` lays one global noise field over every compartment (section 7).
@@ -130,8 +147,21 @@ export default function App() {
                 threshold={RISK_THRESHOLD}
                 trucks={trucks}
                 corridors={corridors}
+                fleet={fleet}
+                fleetLoading={fleetLoading}
+                fleetError={fleetError}
               />
             )}
+          />
+          {/* The deep-dive, reached by clicking a unit in the selector on
+              /analytics. Declared AFTER the bare /analytics route so the two
+              cannot race for the same path, and it takes `trucks` from the
+              same socket the map does -- opening a truck's page must not open
+              a second connection, which is the whole reason the hooks live up
+              here. */}
+          <Route
+            path="/analytics/:truckId"
+            element={<TruckAnalytics trucks={trucks} />}
           />
           {/* A wrong URL lands on the map rather than a 404 page. This console
               has one job, and a dead end in front of a dispatcher during an

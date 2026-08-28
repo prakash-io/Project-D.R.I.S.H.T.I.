@@ -98,3 +98,38 @@ export const forecastRoute = (coordinates, sampleKm = 25, maxPoints = 12) =>
       max_points: maxPoints,
     }),
   });
+
+/**
+ * One truck, its driver and its active trip — the analytics deep-dive.
+ *
+ * Separate from getTrucks() rather than an expansion of it: the list is what
+ * every console polls for its first paint, while this joins two more tables
+ * and runs a linear-referencing call to measure how far along the route the
+ * truck actually is. Cheap for one truck, wasteful across a fleet.
+ */
+export const getTruckDetail = (truckId) =>
+  json(`/trucks/${encodeURIComponent(truckId)}`);
+
+/**
+ * Full meteorological metrics along a route (ML-03).
+ *
+ * Open-Meteo is public and CORS-open, so the browser COULD call it directly.
+ * It does not, for the same reason forecastRoute goes through the backend
+ * plus one that is specific to weather: Open-Meteo's hourly series starts at
+ * 00:00 UTC, not at the current hour, so the window has to be located by
+ * searching `hourly.time` (CLAUDE.md decision 11). That rule now lives in
+ * backend/src/services/openMeteo.js and nowhere else. A second implementation
+ * here would be a second place to get it wrong -- silently, and in a way that
+ * shows a dispatcher weather up to 23 hours stale while looking entirely
+ * plausible.
+ *
+ * Returns `{ points, route, daily, units, window_start_utc, hours, sampled }`.
+ * `route` is the per-hour WORST CASE across the sampled points, not a mean:
+ * a corridor is only as passable as its worst point.
+ */
+export const getRouteWeather = (coordinates, points = 3, hours = 48) =>
+  json('/weather/route', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ coordinates, points, hours }),
+  });
