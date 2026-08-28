@@ -323,3 +323,188 @@ routingRouter.get('/trucks', async (_req, res, next) => {
     res.json({ trucks: rows });
   } catch (error) { next(error); }
 });
+
+/**
+ * GET /trucks/:id -- one truck, its driver, and its active trip.
+ *
+ * The dispatcher's deep-dive (analytics/:truckId) reads this. It is a
+ * separate endpoint from GET /trucks rather than a fatter version of it
+ * because the list is polled by every open console for the first paint and
+ * this joins two more tables and runs a linear-referencing call per row --
+ * cheap for one truck, wasteful across the fleet.
+ *
+ * PROGRESS is measured, not assumed. ST_LineLocatePoint gives the fraction
+ * along the planned route that is nearest the last known position, so the
+ * remaining distance and the ETA come from where the truck actually IS. The
+ * alternative -- started_at plus the planned duration -- is a schedule, not an
+ * estimate, and it keeps reporting an on-time arrival for a truck that has
+ * been stopped at a landslide for an hour.
+ *
+ * When there is no fix or no planned geometry to locate one against, progress
+ * is null and the planned figures are returned unchanged. The response says
+ * which of the two it is (`progress_source`) rather than letting the page
+ * present a schedule as though it were a measurement.
+ */
+routingRouter.get('/trucks/:id', async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT t.id, t.plate, t.driver_name, t.phone, t.alert_lang, t.created_at,
+              ST_Y(l.geom) AS last_lat, ST_X(l.geom) AS last_lng,
+              l.source, l.speed_mps, l.captured_at,
+              tp.id AS trip_id, tp.status AS trip_status, tp.started_at,
+              ST_Y(tp.origin)      AS origin_lat,
+              ST_X(tp.origin)      AS origin_lng,
+              ST_Y(tp.destination) AS destination_lat,
+              ST_X(tp.destination) AS destination_lng,
+              tp.planned_distance_m, tp.planned_duration_sec,
+              -- Only meaningful with both a route and a fix; SQL returns NULL
+              -- for the whole CASE otherwise, which is what the page reads as
+              -- "not measurable" rather than as zero progress.
+              CASE WHEN tp.planned_route IS NOT NULL AND l.geom IS NOT NULL
+                   THEN ST_LineLocatePoint(tp.planned_route, l.geom)
+              END AS progress,
+              -- Simplified for transport. 60 m is well under the width this
+              -- line is drawn at on the analytics map and cuts a 4,411-point
+              -- corridor by about an order of magnitude. NOT used for
+              -- anything that follows the geometry vertex by vertex.
+              CASE WHEN tp.planned_route IS NOT NULL
+                   THEN ST_AsGeoJSON(ST_Transform(ST_Simplify(
+                          ST_Transform(tp.planned_route, 3857), 60), 4326))::json
+              END AS geometry
+         FROM trucks t
+         LEFT JOIN truck_last_seen l ON l.truck_id = t.id
+         -- LATERAL rather than a plain join: a truck can carry several
+         -- historical trips and exactly one active, and without the LIMIT a
+         -- data state with two actives would silently return two rows.
+         LEFT JOIN LATERAL (
+           SELECT * FROM trips
+            WHERE truck_id = t.id AND status = 'active'
+            ORDER BY started_at DESC LIMIT 1
+         ) tp ON true
+        WHERE t.id = $1`,
+      [req.params.id]);
+
+    const row = rows[0];
+    if (!row) return res.status(404).json({ error: 'no such truck' });
+
+    const [originName, destinationName] = await Promise.all([
+      nearestPlaceName(row.origin_lat, row.origin_lng),
+      nearestPlaceName(row.destination_lat, row.destination_lng),
+    ]);
+
+    const distanceM = numberOrNull(row.planned_distance_m);
+    const durationSec = numberOrNull(row.planned_duration_sec);
+    const progress = numberOrNull(row.progress);
+    const measured = progress !== null;
+    const remainingFraction = measured ? Math.max(0, 1 - progress) : 1;
+
+    const remainingDistanceM = distanceM === null
+      ? null : distanceM * remainingFraction;
+    const remainingDurationSec = durationSec === null
+      ? null : durationSec * remainingFraction;
+
+    res.json({
+      truck: {
+        id: row.id,
+        plate: row.plate,
+        driver_name: row.driver_name,
+        alert_lang: row.alert_lang,
+        ...driverPhone(row.phone, row.id),
+      },
+      last_seen: row.last_lat === null ? null : {
+        lat: row.last_lat,
+        lng: row.last_lng,
+        source: row.source,
+        speed_mps: numberOrNull(row.speed_mps),
+        captured_at: row.captured_at,
+      },
+      trip: !row.trip_id ? null : {
+        id: row.trip_id,
+        status: row.trip_status,
+        started_at: row.started_at,
+        origin: { lat: row.origin_lat, lng: row.origin_lng, name: originName },
+        destination: {
+          lat: row.destination_lat, lng: row.destination_lng, name: destinationName,
+        },
+        distance_m: distanceM,
+        duration_sec: durationSec,
+        progress,
+        // Named so the page can never present the fallback as a measurement.
+        progress_source: measured ? 'route_position' : null,
+        remaining_distance_m: remainingDistanceM,
+        remaining_duration_sec: remainingDurationSec,
+        // Computed from NOW plus what is left, so a page left open does not
+        // keep showing an arrival time that has already passed.
+        eta_utc: remainingDurationSec === null
+          ? null
+          : new Date(Date.now() + remainingDurationSec * 1000).toISOString(),
+        geometry: row.geometry,
+      },
+    });
+  } catch (error) { next(error); }
+});
+
+/**
+ * The nearest seeded place to a point, or null past the cutoff.
+ *
+ * trips stores its two ends as bare geometry -- there is no name column -- so
+ * the name has to be recovered by proximity to the corridor endpoints, which
+ * are the only named points in this schema. 25 km is generous enough to match
+ * a trip that was planned to a routable node several hundred metres off the
+ * town centre, and tight enough that a trip into open country returns null
+ * instead of claiming to end in a city an hour away. The page shows the
+ * coordinates when this is null; it never invents a name.
+ */
+const PLACE_MATCH_METRES = 25000;
+
+async function nearestPlaceName(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const { rows } = await query(
+    `SELECT name,
+            ST_Distance(pt::geography,
+                        ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS metres
+       FROM (
+         SELECT origin_name AS name, origin::geometry AS pt FROM corridors
+         UNION
+         SELECT destination_name, destination::geometry FROM corridors
+       ) p
+      ORDER BY metres
+      LIMIT 1`,
+    [lng, lat]);
+  const row = rows[0];
+  if (!row || Number(row.metres) > PLACE_MATCH_METRES) return null;
+  return row.name;
+}
+
+/**
+ * The driver's contact number.
+ *
+ * `trucks.phone` is real and has been in the schema since migration 001 -- it
+ * is simply not populated on the demonstration fleet (0 of 9 rows). Rather
+ * than show a blank where a dispatcher expects a number, a stable placeholder
+ * is derived from the truck's own id and FLAGGED as one. The flag is the
+ * important half: an unmarked fake number in an incident console is something
+ * somebody eventually dials.
+ *
+ * Deterministic so it does not change between page loads, and drawn from the
+ * +91 6-9 mobile range so it is obviously a mobile without colliding with a
+ * real allocation any more than any invented number does.
+ */
+function driverPhone(stored, truckId) {
+  if (stored) return { phone: stored, phone_is_placeholder: false };
+  const hex = String(truckId).replace(/[^0-9a-f]/gi, '');
+  let digits = '';
+  for (let i = 0; i < hex.length && digits.length < 9; i += 1) {
+    digits += (parseInt(hex[i], 16) % 10).toString();
+  }
+  digits = digits.padEnd(9, '0');
+  return {
+    phone: `+91 9${digits.slice(0, 4)} ${digits.slice(4, 9)}`,
+    phone_is_placeholder: true,
+  };
+}
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
