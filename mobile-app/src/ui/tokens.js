@@ -46,6 +46,26 @@ const p = {
   // looking at the same truck must see the same two colours.
   gnss: '#1A73E8',      // GNSS fix   4.6:1 on white
   deadrec: '#B26A00',   // dead reckoning
+
+  // Navigation — the Google Maps convention, deliberately.
+  //
+  // A driver reads a route line before they read anything else on the glass,
+  // and every one of them has already learned "thick blue line = the road I am
+  // on" from an app they use daily. Orange was the product's brand accent and
+  // it was doing that job here, which meant the single most-read element on
+  // the screen needed a legend nobody has time for at 60 km/h. The accent
+  // keeps every other job it had; it just stops being the route.
+  //
+  // Two blues, not one: the casing is what separates the line from a dark
+  // basemap and from the road casings underneath it. A single flat stroke
+  // disappears over a motorway at z14 -- which is the working zoom.
+  navBlue: '#4285F4',     // the route polyline
+  navBlueDeep: '#1967D2', // its casing, drawn wider and underneath
+  // Start and end are green/red rather than two blues. The polyline already
+  // owns blue, so an endpoint in the same hue reads as part of the line
+  // instead of as a terminus.
+  navGreen: '#137333',    // origin      6.4:1 on white
+  navRed: '#C5221F',      // destination 5.9:1 on white
 };
 
 // A driver reads this in a cradle at speed. Sizes are for that distance.
@@ -93,6 +113,14 @@ export const t = {
     okWash: p.greenWash,
     warnText: p.amber600,
     warnWash: p.amberWash,
+
+    // The route on the map. Named for the job, not the hue, so the day a
+    // dispatcher's board and a driver's map have to agree on it there is one
+    // place to change.
+    routeLine: p.navBlue,
+    routeCasing: p.navBlueDeep,
+    routeStart: p.navGreen,
+    routeEnd: p.navRed,
 
     // The two that carry the product's whole meaning.
     sourceGnss: p.gnss,

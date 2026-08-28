@@ -133,7 +133,7 @@ const CACHE_HALF_SPAN = 0.1;
 
 export default function MapCanvas({
   fix, route, proposedRoute, hazards, forecast, zoom, follow, followKey,
-  onUserPan, children,
+  originName, destinationName, onUserPan, children,
 }) {
   const [cacheState, setCacheState] = useState('idle');
   const [night, setNight] = useState(() => isNight());
@@ -238,9 +238,18 @@ export default function MapCanvas({
     return {
       ne: [maxLng, maxLat],
       sw: [minLng, minLat],
-      // Bottom is deepest: the speed card, stat cards and the hazard button
-      // all sit over the lower third of the map.
-      paddingTop: 50, paddingRight: 50, paddingBottom: 200, paddingLeft: 50,
+      // Both edges are deep, because both edges are covered.
+      //
+      // Top clears the Source/Destination card, which is roughly 195 pt: 12 pt
+      // of inset, 24 pt of card padding, two 44 pt fields, the 14 pt connector
+      // and the 48 pt directions button. It was 50 pt while the top of the map
+      // held only the speed card, and leaving it there after the planner moved
+      // up would frame a route with its first quarter behind the form -- with
+      // the origin marker, the one end the driver is looking for, hidden first.
+      //
+      // Bottom clears the speed pill, the ETA band, the source toggle and the
+      // hazard button, which all stack over the lower third.
+      paddingTop: 210, paddingRight: 50, paddingBottom: 200, paddingLeft: 50,
     };
   }, [route]);
 
@@ -326,6 +335,48 @@ export default function MapCanvas({
     ? { type: 'Feature', geometry: { type: 'LineString', coordinates: route } }
     : null;
 
+  /**
+   * The two ends of the route, as a FeatureCollection.
+   *
+   * Taken from the GEOMETRY -- route[0] and route[n-1] -- not from the origin
+   * and destination the driver picked in the planner. Those two are the same
+   * place only in the happy case: pgr_astar starts from the nearest routable
+   * NODE, which on a corridor whose endpoint is a town centre can be several
+   * hundred metres off the pin, and an accepted detour rewrites the line
+   * without touching the planner fields at all. A marker drawn from the
+   * picked place would then float beside the line it claims to terminate,
+   * which is the specific lie this app cannot afford: the driver has to be
+   * able to trust that the blue line is the road and the pins are its ends.
+   *
+   * The names still come from the planner, because a coordinate has no name.
+   * They are labels ON the geometry, never the source of its position.
+   */
+  const routeEnds = React.useMemo(() => {
+    if (!Array.isArray(route) || route.length < 2) return null;
+    const first = route[0];
+    const last = route[route.length - 1];
+    const usable = (c) => Array.isArray(c)
+      && Number.isFinite(c[0]) && Number.isFinite(c[1]);
+    if (!usable(first) || !usable(last)) return null;
+    return {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          // `end` drives every paint expression below, so one source can carry
+          // both markers and MapLibre still draws them in two colours.
+          properties: { end: 'start', label: originName ?? '' },
+          geometry: { type: 'Point', coordinates: first },
+        },
+        {
+          type: 'Feature',
+          properties: { end: 'finish', label: destinationName ?? '' },
+          geometry: { type: 'Point', coordinates: last },
+        },
+      ],
+    };
+  }, [route, originName, destinationName]);
+
   // The detour the driver has been OFFERED but has not accepted. Drawn beside
   // the current route, never instead of it: replacing the line at the moment
   // the payload arrives is exactly the behaviour the accept step exists to
@@ -393,16 +444,103 @@ export default function MapCanvas({
           </MapLibreRN.ShapeSource>
         ) : null}
 
+        {/* The route, drawn the way every navigator draws it: a wide dark
+            casing with a lighter blue laid over it. Two layers on ONE source,
+            so the casing can never drift out of register with the line.
+
+            The casing is not decoration. At z14 -- the working zoom, and the
+            deepest the offline pack stores -- OSM's own motorway casings are
+            themselves broad and light, and a single flat stroke laid over
+            them reads as one more road rather than as the route. The dark
+            edge is what separates it, and it is also what keeps the line
+            legible over the dimmed night raster.
+
+            Opaque, not 0.85. The line was translucent so the road underneath
+            showed through, which is exactly backwards: the driver needs to
+            know which road they are on, not what is beneath it. */}
         {routeLine ? (
           <MapLibreRN.ShapeSource id="route" shape={routeLine}>
             <MapLibreRN.LineLayer
-              id="route-line"
+              id="route-casing"
               style={{
-                lineColor: t.color.accent,
-                lineWidth: 5,
+                lineColor: t.color.routeCasing,
+                lineWidth: 11,
                 lineCap: 'round',
                 lineJoin: 'round',
-                lineOpacity: 0.85,
+              }}
+            />
+            <MapLibreRN.LineLayer
+              id="route-line"
+              style={{
+                lineColor: t.color.routeLine,
+                lineWidth: 7,
+                lineCap: 'round',
+                lineJoin: 'round',
+              }}
+            />
+          </MapLibreRN.ShapeSource>
+        ) : null}
+
+        {/* Start and end. Pure GL circles rather than a SymbolLayer with a
+            pin sprite: an icon image has to be registered with the map before
+            it can be referenced, a missing one renders NOTHING and logs
+            nothing, and this app has never been on a handset -- so the
+            failure would be silent and the driver would simply have no idea
+            where the route ends. Circles cannot fail that way.
+
+            Drawn above the line so neither end is buried under the stroke
+            that terminates there, and below the hazards and the truck, which
+            outrank them. */}
+        {routeEnds ? (
+          <MapLibreRN.ShapeSource id="route-ends" shape={routeEnds}>
+            {/* The white collar. Google draws one for the same reason: over a
+                dark basemap a bare coloured dot has nothing to sit against. */}
+            <MapLibreRN.CircleLayer
+              id="route-end-halo"
+              style={{
+                circleRadius: 10,
+                circleColor: '#FFFFFF',
+                circleStrokeWidth: 1,
+                circleStrokeColor: 'rgba(17, 20, 24, 0.28)',
+              }}
+            />
+            <MapLibreRN.CircleLayer
+              id="route-end-dot"
+              style={{
+                // Green ring for the origin, solid red for the destination --
+                // the start is a place you have left, the end is the one that
+                // matters. The ring/fill difference means the two are still
+                // distinguishable in greyscale and to a colour-blind driver,
+                // so hue is never the only channel.
+                circleRadius: ['case', ['==', ['get', 'end'], 'start'], 5, 7],
+                circleColor: ['case',
+                  ['==', ['get', 'end'], 'start'], t.color.routeStart, t.color.routeEnd],
+                circleStrokeWidth: ['case', ['==', ['get', 'end'], 'start'], 3, 0],
+                circleStrokeColor: '#FFFFFF',
+              }}
+            />
+            {/* Labelled only when the planner knows the names. `label` is ''
+                for a route that arrived as bare geometry, and MapLibre draws
+                nothing for an empty textField -- so this degrades to two
+                unlabelled dots rather than to two dots captioned "undefined".
+                Same glyph stack as the hazard labels: this endpoint 404s on
+                "Open Sans Regular", which is the spelling most examples use. */}
+            <MapLibreRN.SymbolLayer
+              id="route-end-label"
+              style={{
+                textField: ['get', 'label'],
+                textFont: ['Noto Sans Regular'],
+                textSize: 12,
+                textColor: t.color.textPrimary,
+                textHaloColor: '#FFFFFF',
+                textHaloWidth: 1.8,
+                textOffset: [0, -1.4],
+                textAnchor: 'bottom',
+                // A name may be dropped when it would collide; the DOT it
+                // belongs to never is. Losing a label costs a word, losing
+                // the marker costs the driver the end of their route.
+                textAllowOverlap: false,
+                textOptional: true,
               }}
             />
           </MapLibreRN.ShapeSource>
