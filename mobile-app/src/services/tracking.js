@@ -8,6 +8,7 @@ import { accelerometer, gyroscope, setUpdateIntervalForType, SensorTypes }
 import * as edge from './edgeEngine';
 import * as foreground from './foregroundService';
 import { SimulatedDrive } from './simulatedDrive';
+import { SimulatedImu } from './simulatedImu';
 
 const IMU_HZ = 100;
 const MAP_MATCH_EVERY_N_FIXES = 50;   // 5 s at the model's 10 Hz output
@@ -24,7 +25,15 @@ export class Tracker {
     // a truck driving a real pgr_astar corridor; everything downstream of the
     // fix is untouched. See simulatedDrive.js for why this exists.
     this.simulate = simulate ?? null;
+    // The route and the SWITCH are two different things, and they used to be
+    // one. Holding the corridor in `simulate` and reading its presence as
+    // "simulate now" meant the driver could not turn the demonstration off
+    // without losing the route, and could not turn it on without a corridor
+    // already loaded. The toggle needs to flip the source with the route left
+    // exactly where it is, so the flag is separate from the geometry.
+    this.simulationEnabled = Boolean(simulate);
     this.drive = null;
+    this.imu = null;
 
     this.mode = 'idle';
     this.lastFix = null;
@@ -84,7 +93,7 @@ export class Tracker {
         this.onFix?.({ ...this.lastFix, source: 'gps' });
     };
 
-    if (this.simulate?.coordinates?.length >= 2) {
+    if (this.simulationEnabled && this.simulate?.coordinates?.length >= 2) {
       this.drive = new SimulatedDrive({
         coordinates: this.simulate.coordinates,
         speedKmh: this.simulate.speedKmh ?? 60,
@@ -153,19 +162,21 @@ export class Tracker {
       this.onFix?.({ ...fix, source: 'ekf' });
     });
 
-    setUpdateIntervalForType(SensorTypes.accelerometer, 1000 / IMU_HZ);
-    setUpdateIntervalForType(SensorTypes.gyroscope, 1000 / IMU_HZ);
-
-    // Accelerometer and gyroscope arrive as separate streams with their own
-    // timestamps. The engine needs both channels in one sample, so the latest
-    // gyro reading is paired with each accelerometer reading -- at 100 Hz they
-    // are at most 10 ms apart, which is well inside the 100 ms the decimated
-    // sample represents.
-    let latestGyro = { x: 0, y: 0, z: 0 };
-    this.sensors.push(gyroscope.subscribe(({ x, y, z }) => { latestGyro = { x, y, z }; }));
-    this.sensors.push(accelerometer.subscribe(({ x, y, z, timestamp }) => {
-      edge.pushImu?.(x, y, z, latestGyro.z, latestGyro.x, latestGyro.y, timestamp / 1000);
-    }));
+    // The demonstration dark zone.
+    //
+    // Dead reckoning is fed by the IMU, not by either position source, so the
+    // GNSS toggle alone cannot show it: a handset on a desk with the network
+    // pulled produces a correct dark zone in which the truck does not move.
+    // When the driver has chosen the corridor, the INERTIAL sensor is
+    // substituted too -- and only the sensor. edge.pushImu, the C++ decimator,
+    // the EKF, the map matcher and the queue below are the same code on both
+    // sides of this branch.
+    //
+    // See simulatedImu.js for what is real in that stream and what is not;
+    // the short version is that the speed measurement is injected at the
+    // speed model's own held-out error rather than cleanly, so the drift the
+    // demonstration shows is the drift the real model would produce.
+    this.swapInertialSource();
 
     return true;
   }
@@ -219,6 +230,18 @@ export class Tracker {
       coordinates,
       speedKmh: speedKmh ?? this.simulate?.speedKmh ?? 60,
     };
+    // Stored but not started while the driver is on real GNSS: they may be
+    // planning the route they intend to demonstrate later, and switching them
+    // onto a simulated drive because they picked a destination would replace
+    // their actual position without being asked.
+    if (!this.simulationEnabled) return true;
+    // Mid-blackout the corridor is what the synthetic IMU is walking, so a new
+    // route has to reach it. Swapped in place for the same reason setSimulated
+    // does it that way -- restarting the engine would discard the EKF state.
+    if (this.mode === 'offline') {
+      this.swapInertialSource();
+      return true;
+    }
     if (this.mode !== 'online') return true;
     // Restart through startOnline so there is one construction path for the
     // drive rather than two that can drift apart.
@@ -226,6 +249,94 @@ export class Tracker {
     this.mode = 'idle';
     this.startOnline();
     return true;
+  }
+
+  /**
+   * Switch the position source between the handset's GNSS and the simulated
+   * corridor drive, mid-session (the demonstration toggle).
+   *
+   * Everything downstream of the fix is untouched by this: the same onPosition
+   * handler, the same socket emit, the same WatermelonDB queue, the same
+   * backend ingest. That is the whole contract of the simulated drive -- it
+   * substitutes the SENSOR, never the system -- and it is why the toggle can
+   * be a runtime switch at all rather than a build flag.
+   *
+   * Returns false when simulation was asked for and there is no corridor to
+   * drive. The caller has to be able to tell that apart from a successful
+   * switch, because the truck would otherwise silently stop moving.
+   */
+  setSimulated(enabled) {
+    const wanted = Boolean(enabled);
+    if (wanted === this.simulationEnabled) return true;
+    if (wanted && !(this.simulate?.coordinates?.length >= 2)) return false;
+    this.simulationEnabled = wanted;
+
+    // A switch during a blackout now has something to do, where it used to
+    // have nothing: the inertial source is substitutable too (see
+    // startOffline), so flipping the toggle mid-dark-zone has to swap the
+    // sensor feeding the filter.
+    //
+    // What it must NOT do is restart the engine. Tearing it down would
+    // discard the EKF's accumulated state and its covariance -- the only
+    // position estimate the driver has during a blackout, and the thing the
+    // map matcher has spent the whole dark zone correcting. So only the
+    // sensor is exchanged, in place, with the filter left running.
+    if (this.mode !== 'online') {
+      if (this.mode === 'offline') this.swapInertialSource();
+      return true;
+    }
+
+    this.stopOnline();
+    this.mode = 'idle';
+    this.startOnline();
+    return true;
+  }
+
+  /**
+   * Exchange the inertial source mid-blackout, leaving the EKF running.
+   *
+   * Split out from setSimulated so the "never restart the engine" rule lives
+   * in one place rather than being re-derived by the next caller who needs it.
+   */
+  swapInertialSource() {
+    if (this.imu) {
+      this.imu.stop();
+      this.imu = null;
+    }
+    this.sensors.forEach((s) => s.unsubscribe());
+    this.sensors = [];
+
+    if (this.simulationEnabled && this.simulate?.coordinates?.length >= 2) {
+      this.imu = new SimulatedImu({
+        coordinates: this.simulate.coordinates,
+        speedKmh: this.simulate.speedKmh ?? 60,
+        loop: this.simulate.loop ?? true,
+        onSample: (ax, ay, az, gyroYaw, gyroPitch, gyroRoll, timestampS) =>
+          edge.pushImu?.(ax, ay, az, gyroYaw, gyroPitch, gyroRoll, timestampS),
+        // The measurement the TFLite model is supposed to produce. Wiring it
+        // here rather than leaving it out is what lets the filter hold a speed
+        // at all: EKF_TFLite_Bridge is not yet connected to UpdateSpeed on the
+        // native side, so without this the estimate coasts on its seed
+        // velocity alone and the demonstration would show the wrong drift.
+        onSpeed: (speedMps) => edge.updateSpeed?.(speedMps),
+      });
+      this.imu.start();
+      return;
+    }
+
+    setUpdateIntervalForType(SensorTypes.accelerometer, 1000 / IMU_HZ);
+    setUpdateIntervalForType(SensorTypes.gyroscope, 1000 / IMU_HZ);
+
+    // Accelerometer and gyroscope arrive as separate streams with their own
+    // timestamps. The engine needs both channels in one sample, so the latest
+    // gyro reading is paired with each accelerometer reading -- at 100 Hz they
+    // are at most 10 ms apart, which is well inside the 100 ms the decimated
+    // sample represents.
+    let latestGyro = { x: 0, y: 0, z: 0 };
+    this.sensors.push(gyroscope.subscribe(({ x, y, z }) => { latestGyro = { x, y, z }; }));
+    this.sensors.push(accelerometer.subscribe(({ x, y, z, timestamp }) => {
+      edge.pushImu?.(x, y, z, latestGyro.z, latestGyro.x, latestGyro.y, timestamp / 1000);
+    }));
   }
 
   stopOnline() {
@@ -240,6 +351,10 @@ export class Tracker {
   }
 
   async stopOffline() {
+    if (this.imu) {
+      this.imu.stop();
+      this.imu = null;
+    }
     this.sensors.forEach((s) => s.unsubscribe());
     this.sensors = [];
     if (this.unsubscribeEdge) {

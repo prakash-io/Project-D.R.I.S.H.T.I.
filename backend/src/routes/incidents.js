@@ -18,6 +18,9 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 *
 
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+/// Mirrors the CHECK constraint on incidents.kind (migration 001).
+const REPORTABLE_KINDS = new Set(['landslide', 'flood', 'obstruction']);
+
 /**
  * Persist the driver's photo.
  *
@@ -77,6 +80,19 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       return res.status(400).json({ error: 'lat and lng are required numbers' });
     }
+    // What the driver says it is. Whitelisted against the table's own CHECK
+    // constraint rather than passed through, so a bad value is a 400 here
+    // instead of a 500 out of Postgres. Advisory only -- it never blocks a
+    // road on its own, it just stops the driver's account of the hazard being
+    // thrown away when the model cannot corroborate it.
+    const rawKind = req.body?.kind;
+    if (rawKind != null && !REPORTABLE_KINDS.has(rawKind)) {
+      return res.status(400).json({
+        error: `kind must be one of ${[...REPORTABLE_KINDS].join(', ')}`,
+      });
+    }
+    const reportedKind = rawKind ?? null;
+
     if (!req.file) return res.status(400).json({ error: 'a photo file is required' });
     if (!ALLOWED_IMAGE_TYPES.has(req.file.mimetype)) {
       return res.status(415).json({
@@ -111,16 +127,31 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
       if (error instanceof AiServiceError) {
         // Record it anyway, unclassified. Losing a driver's landslide report
         // because a model was down is worse than a row that needs a human.
+        //
+        // Queued for a dispatcher, not parked in 'pending': the review panel
+        // asks for `pending_dispatcher_approval` and nothing else, so a row
+        // written under any other name is invisible on the board -- which is
+        // indistinguishable, to everyone involved, from never having been
+        // sent. An unclassified report needs a human MORE than a classified
+        // one, not less.
         const pending = await insertIncident({
           lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
-          kind: 'obstruction', status: 'pending', confidence: null,
-          aiClass: null, aiReviewed: false, photoPath, clientUid,
+          kind: reportedKind ?? 'obstruction', status: 'pending_dispatcher_approval',
+          confidence: null, aiClass: null, aiReviewed: false, photoPath, clientUid,
+        });
+        // ...and announced. The board is driven by this broadcast; without it
+        // the report waits for whenever someone next reloads the page.
+        broadcast(INCIDENT_EVENT, {
+          ...pending,
+          ai: { available: false, error: error.message },
+          snapped_to_edge: snap.edgeId,
         });
         return res.status(202).json({
           incident: pending,
           snapped_to_edge: snap.edgeId,
           distance_m: snap.distanceM,
           ai: { available: false, error: error.message },
+          awaiting_dispatcher: true,
           note: 'stored unclassified; the AI service was unreachable',
         });
       }
@@ -132,23 +163,40 @@ incidentsRouter.post('/report', upload.single('file'), async (req, res, next) =>
 
     // 'verified' is the only status routable_edges honours, so this single
     // choice decides whether a road closes.
-    let status = 'rejected';
-    if (blockable) {
-      status = needsHuman && !config.autoBlockOnAiVerdict
-        ? 'pending_dispatcher_approval'
-        : 'verified';
+    //
+    // What it does NOT decide is whether a person ever sees the report. A
+    // model that does not confirm a hazard sends the photo to the dispatcher
+    // exactly as one that does; the difference is carried on the card, as
+    // dissent for a human to weigh, and `rejected` is reserved for a verdict
+    // a human actually reached.
+    //
+    // Auto-rejecting was a real defect and not a hypothetical one. Both hazard
+    // classes were trained on satellite and aerial imagery while this endpoint
+    // receives ground-level phone photos, so NORMAL_TERRAIN is the CONFIDENT,
+    // EXPECTED answer for a genuine landslide (CLAUDE.md, open Q8). Treating
+    // it as final meant the model quietly overruling the one participant who
+    // was actually standing on the road -- and the handset, reading 201,
+    // deleted its only copy of the photograph.
+    let status = 'pending_dispatcher_approval';
+    if (blockable && !needsHuman && config.autoBlockOnAiVerdict) {
+      status = 'verified';
     }
 
     const incident = await insertIncident({
       lat, lng, truckId: req.body?.truck_id ?? null, edgeId: snap.edgeId,
-      kind: verdict.incident_kind ?? 'obstruction',
+      // The model's class when it found one, otherwise what the DRIVER called
+      // it. Falling straight through to 'obstruction' discarded the only
+      // first-hand account of the hazard on the strength of a verdict that
+      // just said it could not see one.
+      kind: verdict.incident_kind ?? reportedKind ?? 'obstruction',
       status, confidence: verdict.confidence ?? null,
       aiClass: verdict.predicted_class ?? null, aiReviewed: true, photoPath, clientUid,
     });
 
     broadcast(INCIDENT_EVENT, { ...incident, ai: verdict, snapped_to_edge: snap.edgeId });
 
-    const affected = status === 'verified' ? await rerouteAffectedTrips(snap.edgeId, incident.id) : [];
+    const affected = status === 'verified'
+      ? await rerouteAffectedTrips(snap.edgeId, incident.id, incident) : [];
 
     res.status(201).json({
       incident,
@@ -169,8 +217,15 @@ incidentsRouter.get('/', async (req, res, next) => {
   try {
     const status = req.query.status ?? null;
     const { rows } = await query(
-      `SELECT id, kind, status, confidence, ai_class, blocked_edge,
+      `SELECT id, kind, status, confidence, ai_class, ai_reviewed, blocked_edge,
               photo_path IS NOT NULL AS has_photo,
+              -- Did the model back the driver up? Computed here so the panel
+              -- and any other client cannot disagree about what counts as
+              -- agreement. NULL means the model never ran at all, which is a
+              -- third state and must not read as "it said no".
+              CASE WHEN NOT ai_reviewed THEN NULL
+                   ELSE (ai_class IS NOT NULL AND ai_class <> 'NORMAL_TERRAIN')
+              END AS model_agrees,
               ST_Y(geom) AS lat, ST_X(geom) AS lng, reported_at, verified_at,
               approved_by, approved_at
        FROM incidents
@@ -229,7 +284,7 @@ incidentsRouter.post('/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'no incident awaiting approval with that id' });
     }
     const incident = rows[0];
-    const reroutes = await rerouteAffectedTrips(incident.blocked_edge, incident.id);
+    const reroutes = await rerouteAffectedTrips(incident.blocked_edge, incident.id, incident);
     broadcast(INCIDENT_EVENT, { ...incident, approved: true });
     res.json({ incident, blocks_routing: true, reroutes });
   } catch (error) { next(error); }
@@ -301,8 +356,16 @@ async function findByClientUid(clientUid) {
  * Recompute the route for every active trip that used the blocked edge (API-04)
  * and push the new geometry to that truck.
  */
-export async function rerouteAffectedTrips(edgeId, incidentId) {
-  if (!edgeId) return [];
+export async function rerouteAffectedTrips(rawEdgeId, incidentId, incident = null) {
+  if (!rawEdgeId) return [];
+  // road_edges.id is a bigint, and node-postgres hands bigints back as STRINGS
+  // to avoid silently truncating them past 2^53. Both callers reach here by
+  // different routes -- snapToEdge() already casts to a number, the approval
+  // path reads incidents.blocked_edge raw -- so the same edge arrived as
+  // 150110 or as '150110' depending on which one fired, and a client doing a
+  // strict comparison against it was right half the time. Normalised once,
+  // here, rather than at each of the four places it is used below.
+  const edgeId = Number(rawEdgeId);
   const trips = await tripsUsingEdge(edgeId);
   const results = [];
 
@@ -315,15 +378,38 @@ export async function rerouteAffectedTrips(edgeId, incidentId) {
       continue;
     }
 
-    await withTransaction(async (client) => {
-      await client.query(
-        `UPDATE trips SET planned_route = ST_GeomFromGeoJSON($2) WHERE id = $1`,
-        [trip.trip_id, JSON.stringify(route.geometry)]);
-      await client.query(
-        `INSERT INTO reroutes (trip_id, incident_id, new_route, trigger_type, reason)
-         VALUES ($1, $2, ST_GeomFromGeoJSON($3), 'incident', $4)`,
+    // The detour is offered against the route it replaces, so the driver is
+    // answering "+38 km, +52 min" rather than a bare number they have nothing
+    // to compare with. planned_duration_sec is null on a trip created before
+    // migration 010; the distance still measures, so the card degrades to
+    // distance-only rather than to nothing.
+    const previous = await previousCosting(trip.trip_id);
+
+    const rerouteId = await withTransaction(async (client) => {
+      // previous_route is captured from the row being overwritten, in the
+      // same statement pair and the same transaction. Reading it afterwards
+      // would race the UPDATE and store the new path as its own predecessor.
+      const { rows } = await client.query(
+        `INSERT INTO reroutes (trip_id, incident_id, new_route, trigger_type, reason,
+                               previous_route, distance_m, duration_sec,
+                               previous_distance_m, previous_duration_sec)
+         SELECT $1, $2, ST_GeomFromGeoJSON($3), 'incident', $4,
+                t.planned_route, $5, $6, $7, $8
+           FROM trips t WHERE t.id = $1
+         RETURNING id`,
         [trip.trip_id, incidentId, JSON.stringify(route.geometry),
-         `edge ${edgeId} blocked by incident ${incidentId}`]);
+         `edge ${edgeId} blocked by incident ${incidentId}`,
+         route.distanceM, route.durationSec,
+         previous.distanceM, previous.durationSec]);
+
+      await client.query(
+        `UPDATE trips SET planned_route = ST_GeomFromGeoJSON($2),
+                          planned_distance_m = $3, planned_duration_sec = $4
+          WHERE id = $1`,
+        [trip.trip_id, JSON.stringify(route.geometry),
+         route.distanceM, route.durationSec]);
+
+      return rows[0]?.id ?? null;
     });
 
     // `route_geom` carries the geometry ONCE. It was tempting to keep the old
@@ -338,13 +424,67 @@ export async function rerouteAffectedTrips(edgeId, incidentId) {
       new_distance_m: route.distanceM,
       estimated_time_sec: route.durationSec,
       distance_m: route.distanceM,
+
+      // ---- what makes this an OFFER rather than an instruction ----
+      // The handset draws the proposal, quotes both figures and waits for a
+      // tap; POST /reroutes/:id/ack carries the answer back. A client that
+      // predates this simply ignores the extra keys and applies the route as
+      // before, which is why nothing here is a breaking change.
+      reroute_id: rerouteId,
+      requires_ack: true,
+      previous_distance_m: previous.distanceM,
+      previous_time_sec: previous.durationSec,
+      // Pre-computed rather than left to the client: two clients doing this
+      // subtraction themselves is two chances to disagree about what the
+      // driver was told, and the dashboard and the handset must not.
+      delta_distance_m: Number.isFinite(previous.distanceM)
+        ? route.distanceM - previous.distanceM : null,
+      delta_time_sec: Number.isFinite(previous.durationSec)
+        ? route.durationSec - previous.durationSec : null,
+      // Why, in the words the driver's alert has to use.
+      incident: incident ? {
+        id: incident.id ?? incidentId,
+        kind: incident.kind ?? null,
+        lat: incident.lat ?? null,
+        lng: incident.lng ?? null,
+      } : { id: incidentId, kind: null, lat: null, lng: null },
+      blocked_edge: edgeId,
     };
     emitTo(`truck:${trip.truck_id}`, ROUTE_EVENT, payload);
     emitTo('dispatchers', ROUTE_EVENT, payload);
     results.push({ trip_id: trip.trip_id, truck_id: trip.truck_id, rerouted: true,
+      reroute_id: rerouteId,
       distance_m: route.distanceM, estimated_time_sec: route.durationSec });
   }
   return results;
+}
+
+/**
+ * What the trip's current route costs, for the comparison the driver is shown.
+ *
+ * The stored figures win when they exist, because they were costed per edge by
+ * travelTime.js. ST_Length is the fallback and it gives distance ONLY -- a
+ * duration cannot be recovered from a bare LineString, since the ETA depends
+ * on each edge's road class, surface and sinuosity. Returning null there is
+ * the honest answer; guessing an average speed would put a fabricated "+40
+ * min" in front of a driver deciding whether to take a mountain detour.
+ */
+async function previousCosting(tripId) {
+  const { rows } = await query(
+    `SELECT planned_distance_m, planned_duration_sec,
+            ST_Length(planned_route::geography) AS measured_m
+       FROM trips WHERE id = $1`,
+    [tripId]);
+  const row = rows[0];
+  if (!row) return { distanceM: null, durationSec: null };
+  const stored = Number(row.planned_distance_m);
+  const measured = Number(row.measured_m);
+  const duration = Number(row.planned_duration_sec);
+  return {
+    distanceM: Number.isFinite(stored) ? stored
+      : (Number.isFinite(measured) ? measured : null),
+    durationSec: Number.isFinite(duration) ? duration : null,
+  };
 }
 
 /** Reroute from where the truck actually is, not from where it set off. */

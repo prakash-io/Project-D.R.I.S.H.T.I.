@@ -1,9 +1,16 @@
 // Incident review (WEB-05).
 //
 // This panel is the safety valve the whole incident pipeline is built around.
-// The vision model has no "no incident" class and was trained on satellite and
-// aerial imagery while drivers send ground-level photos, so its verdict is
-// evidence, not authority. Nothing here closes a road until a person clicks.
+// The vision model was trained on satellite and aerial imagery while drivers
+// send ground-level photos, so its verdict is evidence, not authority.
+// Nothing here closes a road until a person clicks.
+//
+// Every report now arrives here, INCLUDING the ones the model did not back --
+// it used to mark those `rejected` and no one ever saw them, which meant a
+// classifier working outside its training distribution could silently overrule
+// the driver standing on the road. So the card has to answer the dispatcher's
+// first question immediately: did the model agree with the person who sent
+// this? Disagreement is the interesting case, not the discardable one.
 //
 // Frozen strings: "<n> awaiting approval", the Approve button's leading text,
 // and the "Edge <n> blocked" result line. verify.mjs asserts on all three --
@@ -36,6 +43,44 @@ function ConfidenceMeter({ value }) {
         {(Number(value) * 100).toFixed(1)}%
       </span>
     </span>
+  );
+}
+
+/**
+ * Where the model stands relative to the driver, in one line.
+ *
+ * Three states, never two. "The model said no" and "the model never ran" look
+ * identical on a card that only prints a class name, and they call for
+ * opposite amounts of scepticism -- so `model_agrees` is NULL rather than
+ * false when the service was down, and that NULL is rendered as its own case.
+ *
+ * The disagreement copy is deliberately not neutral. A dispatcher reading
+ * "NORMAL_TERRAIN, 98%" with no framing will reasonably discount the photo,
+ * and for ground-level imagery that confidence is close to meaningless: the
+ * hazard classes were trained on satellite tiles, so a genuine landslide
+ * photographed from a cab is out of distribution and 98% NORMAL_TERRAIN is
+ * the expected wrong answer, not a red flag about the driver.
+ */
+function ModelStance({ incident }) {
+  const agrees = incident.model_agrees;
+
+  const [tone, text] = agrees === null || agrees === undefined
+    ? ['border-muted bg-muted/5 text-muted',
+      'The vision model never ran on this photo — the service was unreachable. '
+      + 'The image is the only evidence here.']
+    : agrees
+      ? ['border-warn bg-warn/5 text-warn',
+        'The model agrees with the driver. It is still a model verdict on a '
+        + 'ground-level photo — check the image before closing the road.']
+      : ['border-danger bg-danger/5 text-danger-text',
+        'The model does NOT see a hazard, but the driver stopped and '
+        + 'photographed one. Ground photos are outside this model’s training '
+        + 'data, so trust the image over the class.'];
+
+  return (
+    <div className={`mx-3 mt-3 border-l-2 px-3 py-2 ${tone}`}>
+      <p className="font-mono text-[10px] leading-relaxed">{text}</p>
+    </div>
   );
 }
 
@@ -152,19 +197,15 @@ export default function IncidentPanel({ incidents, approve, reject, busyId, erro
               </div>
 
               <dl className="divide-y divide-edge/60">
+                <Row term="Driver reported">
+                  {KIND_LABEL[incident.kind] ?? incident.kind}
+                </Row>
                 <Row term="AI class">{incident.ai_class ?? '—'}</Row>
                 <Row term="Confidence"><ConfidenceMeter value={incident.confidence} /></Row>
                 <Row term="Blocks edge">{incident.blocked_edge ?? '—'}</Row>
               </dl>
 
-              {/* Stated on every card, not buried in documentation: the person
-                  clicking Approve is the reason this step exists. */}
-              <div className="mx-3 mt-3 border-l-2 border-warn bg-warn/5 px-3 py-2">
-                <p className="font-mono text-[10px] leading-relaxed text-warn">
-                  Model verdict only. It cannot recognise “nothing wrong here”.
-                  Check the photo before closing the road.
-                </p>
-              </div>
+              <ModelStance incident={incident} />
 
               <div className="flex gap-px bg-edge p-3">
                 <button

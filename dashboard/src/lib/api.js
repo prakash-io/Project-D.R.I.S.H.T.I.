@@ -65,3 +65,36 @@ export const planRoute = (from, to, riskWeight = 0) =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ from, to, risk_weight: riskWeight }),
   });
+
+/**
+ * Hazard forecast along one corridor — the Alerts page's data source.
+ *
+ * This is the XGBoost model behind `/predict-hazard`, reached through the
+ * Node backend rather than called at the FastAPI service directly. Three
+ * reasons, and none of them is squeamishness about an extra origin:
+ *
+ *   1. FastAPI is not CORS-open to the browser, and it should not be — it
+ *      holds the GeoTIFF handles and the KDTree pickles and has no auth of
+ *      its own. `backend/src/routes/risk.js` is the boundary.
+ *   2. The rainfall window has to be located via `hourly.time`, never sliced
+ *      from index 0 (CLAUDE.md decision 11). That lives in one place server
+ *      side; a second caller re-deriving it is a second place to get it
+ *      wrong, silently, in a way that shifts every forecast by hours.
+ *   3. `/risk/route` samples the polyline before it scores, so a 4,411-point
+ *      corridor costs ~12 model calls rather than 4,411.
+ *
+ * Returns `{ hazards, sampled, threshold, degraded, generated_at }`. Note
+ * `degraded`: the backend returns whatever it scored before an AI-service
+ * failure rather than erroring, because a partial forecast is still a
+ * warning while an empty one reads as "nothing ahead".
+ */
+export const forecastRoute = (coordinates, sampleKm = 25, maxPoints = 12) =>
+  json('/risk/route', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      coordinates,
+      sample_km: sampleKm,
+      max_points: maxPoints,
+    }),
+  });

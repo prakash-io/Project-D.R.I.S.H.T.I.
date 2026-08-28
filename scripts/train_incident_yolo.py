@@ -90,6 +90,22 @@ DEFAULT_OUT = ROOT / "data" / "artifacts" / "vision" / "incident-yolov8n.pt"
 
 SPLITS = ("train", "val", "test")
 
+
+def rel(path: Path) -> str:
+    """Path relative to ROOT for display, falling back to the absolute path.
+
+    `Path.relative_to` RAISES when the target is outside ROOT, and every call
+    site here is building a log line. That turned a cosmetic concern into a
+    crash the moment the script was pointed at a data directory in another
+    checkout -- which is exactly what happens under a git worktree, where the
+    code is versioned per worktree but the gitignored `data/` tree is not.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 #: Filename prefix -> the class that prefix's pool actually depicts. This is
 #: the `pool` label source: the two image pools are `flood_*` and
 #: `landslide_*`, and the pool is the only content-derived signal in the
@@ -284,7 +300,7 @@ def main() -> int:
                      f"trains a class the model will never predict.")
         negatives_dir = args.negatives
         print(f"==> negative class {NEGATIVE_CLASS}: {n_negatives} images from "
-              f"{args.negatives.relative_to(ROOT)}")
+              f"{rel(args.negatives)}")
 
     if args.label_source == "pool":
         # Order fixed here rather than taken from data.yaml: in pool mode
@@ -303,7 +319,7 @@ def main() -> int:
         print("    WARNING: NORMAL_TERRAIN and DAMAGED_BRIDGE_INFRASTRUCTURE are "
               "assigned by filename index arithmetic and cannot be learned.")
 
-    print(f"==> building classification tree at {args.cls_dir.relative_to(ROOT)}")
+    print(f"==> building classification tree at {rel(args.cls_dir)}")
     stats = build_classification_tree(args.src, args.cls_dir, classes,
                                       args.label_source, negatives_dir)
     if args.prepare_only:
@@ -380,7 +396,7 @@ def main() -> int:
         "label_source": args.label_source,
         "negative_class": None if negatives_dir is None else {
             "name": NEGATIVE_CLASS,
-            "source": str(negatives_dir.relative_to(ROOT)),
+            "source": str(rel(negatives_dir)),
             "why": (
                 "a two-class softmax cannot answer 'neither', so every upload "
                 "was forced to be a flood or a landslide; this class is what "
@@ -411,14 +427,14 @@ def main() -> int:
         "dataset": {s: stats[s]["counts"] for s in SPLITS},
         "test": {"top1": float(metrics.top1), "top5": float(metrics.top5),
                  "per_class": per_class},
-        "source_run": str(best.parent.parent.relative_to(ROOT)),
+        "source_run": str(rel(best.parent.parent)),
     }
     meta_path = args.out.with_name(args.out.stem + "_meta.json")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
-    print(f"\n==> wrote {args.out.relative_to(ROOT)} "
+    print(f"\n==> wrote {rel(args.out)} "
           f"({args.out.stat().st_size / 1e6:.1f} MB)")
-    print(f"==> wrote {meta_path.relative_to(ROOT)}")
+    print(f"==> wrote {rel(meta_path)}")
     print(f"==> total {time.time() - t0:.1f}s")
     return 0
 

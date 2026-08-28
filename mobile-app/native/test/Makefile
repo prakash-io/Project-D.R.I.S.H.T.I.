@@ -29,6 +29,15 @@ test_dead_reckoning: test_dead_reckoning.cpp ../DeadReckoning.cpp ../MapMatcher.
 	$(CXX) $(DR_FLAGS) test_dead_reckoning.cpp ../DeadReckoning.cpp ../MapMatcher.cpp \
 	    ../EdgeEngineApi.cpp -lsqlite3 -o $@
 
+# Reads a synthetic IMU stream on stdin and prints the track the real engine
+# produces. Driven by mobile-app/test/dark_zone_track.test.mjs, which
+# generates the stream from a real corridor and checks the track stays on it.
+sim_drive_track: sim_drive_track.cpp ../DeadReckoning.cpp ../MapMatcher.cpp \
+                 ../EdgeEngineApi.cpp ../DeadReckoning.h ../MapMatcher.h \
+                 ../EdgeEngineApi.h ../Geo.h ../IMU_Constants.h
+	$(CXX) $(DR_FLAGS) sim_drive_track.cpp ../DeadReckoning.cpp ../MapMatcher.cpp \
+	    ../EdgeEngineApi.cpp -lsqlite3 -o $@
+
 .PHONY: run run-dr strict clean
 run: test_bridge test_dead_reckoning
 	./test_bridge
@@ -47,4 +56,4 @@ strict:
 	@echo "clean under strict warnings"
 
 clean:
-	rm -f test_bridge test_dead_reckoning
+	rm -f test_bridge test_dead_reckoning sim_drive_track

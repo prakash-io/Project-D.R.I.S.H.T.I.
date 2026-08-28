@@ -20,9 +20,41 @@ export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap
   if (!incident) return null;
 
   const title = KIND_TITLE[incident.kind] ?? 'VERIFIED HAZARD AHEAD';
-  const km = Number.isFinite(incident.distance_m)
-    ? (incident.distance_m / 1000).toFixed(1) : null;
-  const delay = Number.isFinite(incident.delay_min) ? incident.delay_min : null;
+
+  // What the detour costs, straight from the figures the backend computed on
+  // the road graph -- `delta_distance_m` and `delta_time_sec` off the reroute,
+  // carried in by App.jsx.
+  //
+  // These used to read `incident.distance_m` and `incident.delay_min`, which
+  // no service has ever sent: this card is fed by `incident_reported`, and
+  // that payload is the incidents ROW -- kind, status, confidence, a lat and
+  // a lng. It cannot know what a detour costs one particular truck, because
+  // nothing about a detour is stored on it. Both tiles therefore rendered an
+  // em-dash on every hazard the platform has ever raised, which read as "no
+  // delay" rather than "never wired up".
+  //
+  // `costed` is the third state and the reason this is not just two null
+  // checks: a hazard on the board that has not been routed around yet has no
+  // figures AND no zero. Saying "—" there tells the driver a detour is free.
+  const extraKm = Number.isFinite(incident.extra_distance_m)
+    ? incident.extra_distance_m / 1000 : null;
+  const delayMin = Number.isFinite(incident.delay_sec)
+    ? Math.round(incident.delay_sec / 60) : null;
+  const costed = incident.costed === true;
+
+  // Signed, because a reroute is not always worse. pgr_astar can hand back a
+  // shorter path than the one the truck was on, and printing "+-2.1 KM" or
+  // silently dropping the sign would both misreport it.
+  const signed = (value, unit) => {
+    const rounded = unit === 'MIN' ? Math.round(value) : Number(value.toFixed(1));
+    if (rounded === 0) return unit === 'MIN' ? 'NO DELAY' : 'SAME';
+    return `${rounded > 0 ? '+' : '−'}${Math.abs(rounded)} ${unit}`;
+  };
+
+  const delayText = delayMin != null ? signed(delayMin, 'MIN')
+    : costed ? 'NO DELAY' : 'COSTING…';
+  const distanceText = extraKm != null ? signed(extraKm, 'KM')
+    : costed ? 'SAME' : 'COSTING…';
 
   return (
     <Modal visible transparent animationType="fade"
@@ -43,7 +75,7 @@ export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap
 
           <Text style={styles.body}>
             {incident.message
-              ?? `Reported by dispatch${km ? ` ${km} km ahead` : ''} on your route. Slow down and proceed with caution.`}
+              ?? 'Reported by dispatch on your route. Slow down and proceed with caution.'}
           </Text>
 
           <View style={styles.stats}>
@@ -51,15 +83,30 @@ export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap
               <Icon name="schedule" size={20} color={t.color.alertText}
                     importantForAccessibility="no" />
               <Text style={styles.statLabel}>ESTIMATED{'\n'}DELAY</Text>
-              <Text style={[styles.statValue, { color: t.color.alertText }]}>
-                {delay == null ? '—' : `+${delay} MIN`}
+              <Text
+                style={[styles.statValue, { color: t.color.alertText },
+                        !costed && styles.statPending]}
+                // Read aloud in full: "+12 MIN" is unambiguous on screen and
+                // not in a screen reader.
+                accessibilityLabel={delayMin != null
+                  ? `Estimated delay ${delayMin} minutes`
+                  : costed ? 'No delay' : 'Delay still being calculated'}
+              >
+                {delayText}
               </Text>
             </View>
             <View style={styles.stat}>
               <Icon name="alt-route" size={20} color={t.color.accent}
                     importantForAccessibility="no" />
               <Text style={styles.statLabel}>EXTRA{'\n'}DISTANCE</Text>
-              <Text style={styles.statValue}>{km == null ? '—' : `${km} KM`}</Text>
+              <Text
+                style={[styles.statValue, !costed && styles.statPending]}
+                accessibilityLabel={extraKm != null
+                  ? `Extra distance ${extraKm.toFixed(1)} kilometres`
+                  : costed ? 'No extra distance' : 'Distance still being calculated'}
+              >
+                {distanceText}
+              </Text>
             </View>
           </View>
 
@@ -136,6 +183,14 @@ const styles = StyleSheet.create({
   statValue: {
     fontFamily: t.font.sansMedium, fontSize: t.type.lead, fontWeight: '800',
     color: t.color.textPrimary, marginTop: 4, fontVariant: ['tabular-nums'],
+    // "COSTING…" is longer than any figure it stands in for; without this it
+    // wraps and pushes the two tiles to different heights.
+    textAlign: 'center',
+  },
+  // A number not yet known must not look like a number. Same slot, quieter and
+  // smaller, so the tile does not resize when the real figure lands.
+  statPending: {
+    fontSize: t.type.meta, fontWeight: '600', color: t.color.textMuted,
   },
   silent: {
     fontFamily: t.font.sansMedium, fontSize: t.type.micro, fontWeight: '700',

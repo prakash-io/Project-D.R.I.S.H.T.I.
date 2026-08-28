@@ -11,6 +11,10 @@ import { query } from '../db.js';
 export const TELEMETRY_EVENT = 'truck_location_update';
 export const ROUTE_EVENT = 'route_updated';
 export const INCIDENT_EVENT = 'incident_reported';
+/// The driver's answer to a reroute proposal, fanned out to dispatchers only.
+/// A refused detour is the urgent case: that truck is still driving at the
+/// hazard, and the board must not show it on a road it declined.
+export const ROUTE_ACK_EVENT = 'reroute_ack';
 
 let io = null;
 

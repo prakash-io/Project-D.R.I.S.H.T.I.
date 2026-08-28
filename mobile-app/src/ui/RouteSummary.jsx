@@ -56,14 +56,23 @@ export default function RouteSummary({ distanceM, durationSec, rerouted, style }
   const eta = arrivalClock(durationSec);
   const duration = formatDuration(durationSec);
   const distance = formatDistance(distanceM);
+  // A corridor picked from the rail carries a distance and no ETA -- there is
+  // no stored duration for it, and this client will not invent one. Rather
+  // than head the card with "—", the distance is promoted to the headline and
+  // the supporting line drops out. The card then says less, which is correct,
+  // instead of saying nothing in the largest type on the screen.
+  const durationKnown = Number.isFinite(durationSec) && durationSec >= 0;
+  const headline = durationKnown ? duration : distance;
 
   return (
     <View
       style={[styles.card, t.shadow.card, style]}
       accessibilityRole="summary"
       accessibilityLabel={
-        `${rerouted ? 'New route. ' : ''}${duration} remaining, ` +
-        `${distance}${eta ? `, arriving about ${eta}` : ''}`}
+        `${rerouted ? 'New route. ' : ''}`
+        + (durationKnown
+            ? `${duration} remaining, ${distance}${eta ? `, arriving about ${eta}` : ''}`
+            : `${distance} remaining`)}
     >
       {rerouted ? (
         <View style={styles.flag}>
@@ -78,20 +87,22 @@ export default function RouteSummary({ distanceM, durationSec, rerouted, style }
             already speaks the whole sentence -- otherwise a screen reader
             reads the duration twice. */}
         <Text style={styles.duration} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          {duration}
+          {headline}
         </Text>
       </View>
 
-      <View style={styles.metaRow} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-        <Text style={styles.meta}>{distance}</Text>
-        {eta ? (
-          <>
-            <Text style={styles.dot}>·</Text>
-            <Icon name="schedule" size={13} color={t.color.textMuted} />
-            <Text style={styles.meta}>{eta}</Text>
-          </>
-        ) : null}
-      </View>
+      {durationKnown ? (
+        <View style={styles.metaRow} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+          <Text style={styles.meta}>{distance}</Text>
+          {eta ? (
+            <>
+              <Text style={styles.dot}>·</Text>
+              <Icon name="schedule" size={13} color={t.color.textMuted} />
+              <Text style={styles.meta}>{eta}</Text>
+            </>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }
