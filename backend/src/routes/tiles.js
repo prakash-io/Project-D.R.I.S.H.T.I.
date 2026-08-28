@@ -16,6 +16,13 @@
 // pan the same corridor repeatedly and the upstream is a public national
 // service we should not hammer.
 import { Router } from 'express';
+import { readFileSync } from 'node:fs';
+
+// Read once at startup rather than per request: it is a small static file
+// and re-reading it on every call would put disk I/O in the pack path.
+const MAP_STYLE = JSON.parse(
+  readFileSync(new URL('../mapStyle.json', import.meta.url), 'utf8'),
+);
 
 const BHUVAN = 'https://bhuvan-vec1.nrsc.gov.in/bhuvan/gwc/service/wmts/';
 
@@ -115,3 +122,43 @@ function sendTile(res, buffer, maxAge = 604800) {
     : 'no-store');
   return res.end(buffer);
 }
+
+/**
+ * GET /tiles/style.json
+ *
+ * WHY THIS EXISTS: the handset's offline corridor pack needs a style URI, and
+ * MapLibre will only accept an http(s) one here.
+ *
+ * The obvious approach -- write the style to app storage and pass
+ * `file://.../bhuvan-style.json` -- cannot work, and fails in a way that is
+ * worth recording so nobody tries it again. MapLibre Native resolves ordinary
+ * map resources through MainResourceLoader, which does dispatch `file://` to
+ * LocalFileSource. The OFFLINE DOWNLOAD path does not: OfflineDownload holds
+ * an OnlineFileSource and puts every resource it needs -- the style included
+ * -- through it. On Android that is the OkHttp-backed HttpRequestImpl, whose
+ * first move is `okhttp3.HttpUrl.parse(resourceUrl)`. HttpUrl.parse accepts
+ * http and https and returns null for everything else, so a `file://` style
+ * URL logs
+ *
+ *     [HTTP] Unable to parse resourceUrl file:///data/user/0/.../style.json
+ *
+ * and the pack silently never builds. `asset://` fails identically, for the
+ * same reason. A reachable http(s) URL is the only option, which is what this
+ * endpoint is. That the device must be online to create a pack is not a new
+ * constraint -- the pack downloads its tiles from the network anyway.
+ *
+ * KEEP IN SYNC with STYLE in mobile-app/src/ui/MapCanvas.jsx. What actually
+ * has to match is the `sources` block: the offline database keys cached tiles
+ * by URL, so the live map only hits the pack when it asks for the same tile
+ * URLs the pack downloaded. Zoom ranges decide which tiles get stored. The
+ * night `paint` treatment is applied by the app at render time and has no
+ * bearing on what a pack contains, so it deliberately does not live here.
+ */
+tilesRouter.get('/style.json', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  // Deliberately not cached by the client: a pack is built once per corridor,
+  // and a handset holding a stale basemap style is precisely the failure the
+  // pack version suffix in MapCanvas exists to recover from.
+  res.setHeader('Cache-Control', 'no-store');
+  return res.end(JSON.stringify(MAP_STYLE));
+});

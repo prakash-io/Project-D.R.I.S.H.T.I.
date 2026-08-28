@@ -713,6 +713,10 @@ export default function App() {
           <ErrorBoundary label="Map">
           <MapCanvas
             fix={fix} route={route}
+            // Needed for the offline corridor pack: MapLibre will only take an
+            // http(s) style URL there, so the pack fetches the style from the
+            // backend rather than from app storage.
+            apiUrl={API_URL}
             // The offered detour, drawn dashed BESIDE the current route. The
             // driver can see where it would take them before deciding, which
             // is the point of asking rather than telling.

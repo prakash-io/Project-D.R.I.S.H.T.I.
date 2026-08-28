@@ -7,7 +7,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, AccessibilityInfo } from 'react-native';
 import * as MapLibreRN from '@maplibre/maplibre-react-native';
-import RNFS from 'react-native-fs';
 import VehicleMarker, { VehicleMarkerFallback } from './VehicleMarker';
 import ErrorBoundary from './ErrorBoundary';
 import { t } from './tokens';
@@ -133,7 +132,7 @@ const CACHE_HALF_SPAN = 0.1;
 
 export default function MapCanvas({
   fix, route, proposedRoute, hazards, forecast, zoom, follow, followKey,
-  originName, destinationName, onUserPan, children,
+  originName, destinationName, onUserPan, apiUrl, children,
 }) {
   const [cacheState, setCacheState] = useState('idle');
   const [night, setNight] = useState(() => isNight());
@@ -173,21 +172,45 @@ export default function MapCanvas({
 
     (async () => {
       try {
-        // The offline pack needs a style URI rather than an inline object, so
-        // the same style is written to disk once and referenced by file://.
-        const stylePath = `${RNFS.DocumentDirectoryPath}/bhuvan-style.json`;
-        await RNFS.writeFile(stylePath, JSON.stringify(STYLE), 'utf8');
+        // The offline pack needs a style URI rather than an inline object, and
+        // it has to be an http(s) one -- see GET /tiles/style.json in
+        // backend/src/routes/tiles.js for why a local file cannot work here.
+        // Short version: the offline downloader puts the style through
+        // OnlineFileSource, which on Android is OkHttp, and HttpUrl.parse()
+        // returns null for any scheme that is not http(s). Writing the style
+        // to app storage and passing `file://` logged "[HTTP] Unable to parse
+        // resourceUrl" once per attempt and never built a pack.
+        //
+        // No backend address means no pack. That is a degraded map, not a
+        // broken one: the live style is the inline object below, so the screen
+        // the driver navigates by is unaffected.
+        if (!apiUrl) {
+          console.warn('[map] no apiUrl; skipping offline corridor pack');
+          setCacheState('failed');
+          return;
+        }
+        const styleURL = `${apiUrl.replace(/\/+$/, '')}/tiles/style.json`;
 
         // VERSIONED. createPack bakes the style into the pack, and the
         // getPack short-circuit below means an existing pack is never
         // refreshed -- so a handset that cached the old style would keep
         // rendering Bhuvan over OSM at z14 no matter what STYLE now says.
         // Bump this suffix whenever STYLE changes so the old pack is bypassed.
-        const name = 'drishti-corridor-v2';
-        // Reclaim the pack cut loose by the version bump. A handset flashed
-        // before the STYLE change still has the v1 corridor on disk, and
+        const name = 'drishti-corridor-v3';
+        // Reclaim the packs cut loose by earlier version bumps. A handset
+        // flashed before a STYLE change still has the old corridor on disk and
         // nothing else will ever ask for it again.
-        await MapLibreRN.offlineManager.deletePack('drishti-corridor').catch(() => {});
+        //
+        // v2 is on this list for a second reason. While the styleURL was a
+        // `file://` one the style fetch always failed, but createPack had
+        // already registered the region -- so a handset that ran that build is
+        // holding a v2 pack with no tiles in it. getPack() below only asks
+        // whether a pack EXISTS, so finding that empty region would report the
+        // corridor "ready" and leave the driver with a blank map in the dark
+        // zone, which is the exact failure the cache is meant to prevent.
+        for (const dead of ['drishti-corridor', 'drishti-corridor-v2']) {
+          await MapLibreRN.offlineManager.deletePack(dead).catch(() => {});
+        }
 
         const existing = await MapLibreRN.offlineManager.getPack(name).catch(() => null);
         if (existing) { setCacheState('ready'); return; }
@@ -196,7 +219,7 @@ export default function MapCanvas({
         await MapLibreRN.offlineManager.createPack(
           {
             name,
-            styleURL: `file://${stylePath}`,
+            styleURL,
             bounds: [
               [fix.longitude - CACHE_HALF_SPAN, fix.latitude - CACHE_HALF_SPAN],
               [fix.longitude + CACHE_HALF_SPAN, fix.latitude + CACHE_HALF_SPAN],
@@ -217,7 +240,7 @@ export default function MapCanvas({
         setCacheState('failed');
       }
     })();
-  }, [fix]);
+  }, [fix, apiUrl]);
 
   // Bounding box of the whole route, so the camera can frame it instead of
   // sitting on top of the truck. Computed as [minLng, minLat, maxLng, maxLat]

@@ -1,0 +1,39 @@
+{
+  "version": 8,
+  "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+  "sources": {
+    "osm-fallback": {
+      "type": "raster",
+      "tiles": [
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+      ],
+      "tileSize": 256,
+      "attribution": "© OpenStreetMap"
+    },
+    "bhuvan-basemap": {
+      "type": "raster",
+      "tiles": [
+        "https://bhuvan-vec1.nrsc.gov.in/bhuvan/gwc/service/wmts/?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=india3&STYLE=default&TILEMATRIXSET=EPSG:900913&TILEMATRIX=EPSG:900913:{z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png"
+      ],
+      "tileSize": 256,
+      "maxzoom": 14,
+      "attribution": "© ISRO / NRSC Bhuvan"
+    }
+  },
+  "layers": [
+    {
+      "id": "osm-layer",
+      "type": "raster",
+      "source": "osm-fallback",
+      "minzoom": 0,
+      "maxzoom": 19
+    },
+    {
+      "id": "bhuvan-layer",
+      "type": "raster",
+      "source": "bhuvan-basemap",
+      "minzoom": 0,
+      "maxzoom": 14
+    }
+  ]
+}
