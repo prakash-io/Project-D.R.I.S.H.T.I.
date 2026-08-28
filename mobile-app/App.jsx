@@ -31,7 +31,7 @@ import { createDatabase } from './src/db';
 import { connect } from './src/services/socket';
 import { watchConnectivity } from './src/services/network';
 import { Tracker } from './src/services/tracking';
-import { requestTrackingPermissions } from './src/services/permissions';
+import { requestTrackingPermissions, requestCameraPermission } from './src/services/permissions';
 import { drain, pendingCount } from './src/services/burstSync';
 import { queueHazard, drainHazards, pendingHazardCount } from './src/services/hazardSync';
 import { ensureEdgeAssets } from './src/services/edgeAssets';
@@ -650,11 +650,30 @@ export default function App() {
     }
     setPicking(true);
     try {
+      // Asked here, not at launch: see requestCameraPermission. Without this
+      // the library refuses to open the camera -- AndroidManifest declares
+      // CAMERA, so it insists the app hold it -- and returns an error that
+      // used to be swallowed below as though the driver had cancelled.
+      if (!(await requestCameraPermission())) {
+        log('WARN', 'HAZARD_NO_CAMERA', 'Camera permission refused.');
+        setAlert('Drishti needs camera access to report a hazard. '
+          + 'Allow it in Settings › Apps › Drishti › Permissions.');
+        return;
+      }
+
       const result = await launchCamera({
         mediaType: 'photo', quality: 0.7,
         maxWidth: 1600, maxHeight: 1600, saveToPhotos: false,
       });
-      if (result?.didCancel || !result?.assets?.length) return;
+      // A cancel is the driver changing their mind and says nothing. An
+      // errorCode is the app failing, and it must never look the same: this
+      // branch used to lump them together, so every failure was a tap that
+      // did nothing with not one line in the log to explain it.
+      if (result?.didCancel) return;
+      if (result?.errorCode) {
+        throw new Error(result.errorMessage ?? `camera error: ${result.errorCode}`);
+      }
+      if (!result?.assets?.length) throw new Error('the camera returned no photo');
 
       const asset = result.assets[0];
       // Written to WatermelonDB BEFORE any network is attempted. A landslide

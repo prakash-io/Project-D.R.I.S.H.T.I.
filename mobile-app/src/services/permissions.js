@@ -50,3 +50,43 @@ export async function requestTrackingPermissions() {
     notifications,
   };
 }
+
+/**
+ * Ask for the camera, immediately before the driver uses it.
+ *
+ * Deliberately NOT part of requestTrackingPermissions. Location is needed to
+ * start a trip, so it is asked for at launch; the camera is needed only if a
+ * driver reports a hazard, which most trips never do. Asking for both at
+ * startup trains the driver to dismiss a prompt they cannot yet see a reason
+ * for -- and on Android a twice-denied permission stops being askable at all.
+ *
+ * It has to be asked for at all because AndroidManifest declares CAMERA.
+ * react-native-image-picker does not itself require that permission, but its
+ * own check is explicit: if an app DECLARES it and has not been granted it,
+ * the library refuses to open the camera rather than let ACTION_IMAGE_CAPTURE
+ * throw a SecurityException. Nothing in this app requested it, so the refusal
+ * was the permanent state on every clean install -- Report Hazard did
+ * nothing, silently, forever. Declaring a permission you never request is
+ * worse than not declaring it.
+ */
+export async function requestCameraPermission() {
+  if (Platform.OS !== 'android') return true;
+
+  // check() first: request() on an already-granted permission is a no-op, but
+  // on a permanently-denied one it returns NEVER_ASK_AGAIN without a prompt,
+  // and the caller needs to tell those two apart to say something useful.
+  if (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA)) {
+    return true;
+  }
+
+  const result = await PermissionsAndroid.request(
+    PermissionsAndroid.PERMISSIONS.CAMERA,
+    {
+      title: 'Drishti needs the camera',
+      message: 'A hazard report is a photograph of the road. The dispatcher '
+        + 'sees the picture next to the model’s verdict before closing a road.',
+      buttonPositive: 'Allow',
+    },
+  );
+  return result === PermissionsAndroid.RESULTS.GRANTED;
+}
