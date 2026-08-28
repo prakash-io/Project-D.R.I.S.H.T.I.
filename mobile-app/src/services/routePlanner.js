@@ -12,6 +12,7 @@
 // -- see the note in RouteSummary about why an on-device guess would be worse
 // than no number at all.
 import RNFS from 'react-native-fs';
+import { BUNDLED_PLACES, mergePlaces } from './places.seed';
 
 /**
  * Abort a fetch after `ms`.
@@ -63,8 +64,18 @@ async function readCache(path) {
  * geocoder would accept a village the graph does not cover and hand the driver
  * a 422 they cannot tell from a server fault.
  *
- * Cached, because the destination field is the first thing the driver touches
- * and a truck can start its shift already out of signal.
+ * Three sources, in falling order of authority: the server, the on-device
+ * cache, and the list compiled into the bundle. The last one is why this
+ * function can no longer return an empty array. It used to, and the result on
+ * a handset was the screen in the bug report -- "Choose source" with nothing
+ * under it and a sentence about waiting for dispatch, on a truck that can
+ * start its shift already out of signal and on a clean install that has no
+ * cache to answer from. Every bundled row is an endpoint of a seeded corridor,
+ * so the reachability guarantee above holds for all three sources.
+ *
+ * The server's rows are merged OVER the bundled ones rather than replacing
+ * them: a reseed that adds a corridor shows its new towns immediately, and one
+ * that is mid-run does not make the picker shrink under the driver.
  */
 export async function listPlaces(apiUrl, { timeoutMs = 15000 } = {}) {
   try {
@@ -75,11 +86,19 @@ export async function listPlaces(apiUrl, { timeoutMs = 15000 } = {}) {
     } finally { t.done(); }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const { places } = await response.json();
-    await writeCache(PLACES_CACHE, places);
-    return places;
+    // Only a non-empty answer is worth caching. A 200 carrying [] means the
+    // corridors table has not been seeded yet, and writing that over a good
+    // cache would turn a transient server state into a persistent one.
+    if (Array.isArray(places) && places.length) {
+      await writeCache(PLACES_CACHE, places);
+      return mergePlaces(places);
+    }
+    console.warn('[routing] places came back empty; using the bundled list');
+    return BUNDLED_PLACES;
   } catch (error) {
     console.warn('[routing] places failed, falling back to cache:', error.message);
-    return (await readCache(PLACES_CACHE)) ?? [];
+    const cached = await readCache(PLACES_CACHE);
+    return cached?.length ? mergePlaces(cached) : BUNDLED_PLACES;
   }
 }
 
