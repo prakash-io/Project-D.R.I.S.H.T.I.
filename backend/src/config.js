@@ -46,6 +46,25 @@ export const config = {
   // unrelated road.
   incidentSnapMaxM: int(process.env.INCIDENT_SNAP_MAX_M, 200),
 
+  // How much road a hazard closes, either side of the report.
+  //
+  // Not zero, and the difference is the whole reroute. Closing only the
+  // snapped edge -- 104 m of NH37 on the Guwahati corridor -- let A* leave the
+  // highway and rejoin it 7 m later over the parallel carriageway and two
+  // slip roads: a "reroute" 99.6% identical to the road the driver was
+  // already on, straight through the landslide. At 120 m the same report
+  // closes the seven edges that make up that junction and the detour becomes
+  // a real 11.4 km diversion.
+  //
+  // Tunable because it is a physical claim about hazards rather than a
+  // property of the graph, and a flood closes more road than a fallen tree.
+  closureRadiusM: int(process.env.CLOSURE_RADIUS_M, 120),
+
+  // How many distinct routes to plan between a trip's two ends. Each one is a
+  // full A* over the corridor, so this is a latency budget as much as a
+  // choice: 3 measured 784 ms on Guwahati-Shillong.
+  routeAlternatives: int(process.env.ROUTE_ALTERNATIVES, 3),
+
   // Whether a verified incident may block an edge without a human. OFF, and
   // it must stay off while the vision model has no "no incident" class and is
   // out of distribution on ground-level photographs. See REVISION.md Q2.

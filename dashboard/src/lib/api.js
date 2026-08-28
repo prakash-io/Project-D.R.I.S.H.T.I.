@@ -49,6 +49,25 @@ export const getCorridors = () =>
   json('/routes/corridors?geometry=1&simplify_m=40');
 
 /**
+ * The route every truck in the fleet is currently driving.
+ *
+ * The console had no way to ask this and it showed: the map drew ten static
+ * corridors and a set of moving vehicles, with nothing joining a truck to the
+ * road it was on. Two trucks on screen and no line under either of them was
+ * the reported bug, and it was not a rendering fault -- the data was never
+ * fetched, because there was no endpoint to fetch it from.
+ *
+ * Simplified server-side at 40 m, the same tolerance the corridor overlay
+ * uses. Eleven raw 4,400-point paths is several megabytes per page load.
+ */
+export const getActiveTrips = () => json('/trips/active?simplify_m=40');
+
+/// Every distinct road one trip could have taken, ranked, with the one being
+/// driven flagged and the ones a hazard has closed marked blocked.
+export const getTripAlternatives = (tripId) =>
+  json(`/trips/${encodeURIComponent(tripId)}/alternatives`);
+
+/**
  * Plan one route live through pgr_astar (API-04).
  *
  * The corridors table already holds a planned geometry for each demo route,

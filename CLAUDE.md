@@ -98,18 +98,32 @@ needs infrastructure and a handset rather than this laptop.
 | Backend | `backend/` (Node 20) | Express+Socket.IO :4000, BullMQ :6380, PostGIS :5433 |
 | Edge engine | `mobile-app/native/` | Eigen EKF + map-matcher + flat C API, 54 checks pass |
 | Driver client | `mobile-app/src/` | services + UI written, **never built or rendered** |
-| Dashboard | `dashboard/` | Vite+React+deck.gl/MapLibre :5173, 22/22 checks |
+| Dashboard | `dashboard/` | Vite+React+deck.gl/MapLibre :5173, 27/27 checks |
 
 Road graph: **486,784 edges / 412,914 nodes**. Mobile extract: 104 MB
-SQLite+R*Tree. Migrations 001-007, ledgered and idempotent.
+SQLite+R*Tree. Migrations 001-011, ledgered and idempotent.
 
 Verification commands:
 
-    ai-services/.venv/bin/python -m pytest ai-services/tests -q   # 59
+    ai-services/.venv/bin/python -m pytest ai-services/tests -q   # 62 + 1 skip
     make -C mobile-app/native/test run                            # 54
-    cd dashboard && node verify.mjs                               # 22
+    cd dashboard && node --test test/                             # 10, heading math
+    cd dashboard && node verify.mjs                               # 27
     cd backend && node test/e2e_verify.mjs                        # full loop
+    cd backend && npm run verify:alternatives                     # routes + scoping
+    cd backend && npm run verify:reroute                          # offer/decline/accept
+    cd backend && npm run verify:visibility                       # a report reaches a human
     cd backend && node simulate_dark_zone_mission.mjs             # Chunk 5
+
+`verify.mjs` and `verify:alternatives` both need live telemetry; start it with
+`cd backend && node test/mock_stream.mjs --seconds 900`, which also seeds the
+pending incident `verify.mjs` consumes.
+
+`npm test` runs `node --test test/`, and Node treats EVERY file under a
+directory called `test/` as a test file -- so it also launches
+`mock_stream.mjs` and sits there for fifteen minutes. Run
+`node --test test/travel_time.test.mjs` for the unit tests and the named
+`verify:*` scripts for the rest.
 
 The last one needs the burst-sync worker running (`cd backend && npm run
 worker`) -- it is a separate process from `npm start`, and without it the
@@ -198,3 +212,44 @@ will reintroduce a bug that has already been found and fixed once.
 12. **Truck interpolation is a lag, never extrapolation.** Drawing ahead of the
     last fix puts a truck where no telemetry placed it.
 13. **Basemap is CARTO dark over OSM** — no API key, no Mapbox token.
+14. **A hazard closes a ROAD, not an edge** (migration 011). Blocking only the
+    edge a report snaps to — 104 m of NH37 — let A* leave the highway at the
+    landslide and rejoin it 7 m later over the parallel carriageway: a
+    "reroute" 99.6% identical to the road the driver was already on. Closures
+    are a set (`incident_blocked_edges`), gathered by `road_closure_edges` from
+    every edge of the same road family within `CLOSURE_RADIUS_M` (120 m).
+    Same report, real detour: 95,164 m → 106,540 m.
+15. **Alternatives come from iterative penalisation, NOT `pgr_ksp`.** Yen's
+    algorithm minimises cost subject to a different edge *sequence*, which on
+    this graph returned four paths differing by a metre (95,164 / 95,165 /
+    95,165 / 95,166 m) — four names for one road. `route_alternatives` plans,
+    multiplies the cost of every edge just used, replans, and keeps a
+    candidate only if it overlaps the accepted set by under `max_overlap` of
+    its own length. Same corridor: 95.2 / 98.9 / 157.2 km, the second sharing
+    4.1%.
+16. **`avoid_edges` is a hard exclusion; 999999 is a price.** The view's
+    blocked cost is a strong hint and A* will still drive a closed road when
+    the alternative costs more — correct for a risk weighting, wrong for a
+    landslide. Reroutes exclude closed edges from the graph outright.
+17. **"Who is affected" and "what to avoid" are different edge sets.** The
+    first is *this* incident's closure; the second is every closed edge on the
+    network. Asking the first with the second made the affected-trip scan grow
+    with the whole incident history — 203 s on a dispatcher's approve click,
+    returning the same one trip. Related: never join trips to edges and
+    `ST_DWithin(planned_route::geography, …)` per edge; that re-casts a
+    4,400-point line per edge per trip (70,409 ms). Buffer the closure once
+    and `ST_Intersects` in geometry (27 ms).
+18. **An unreviewed incident is addressed to its reporter, never the fleet.**
+    `incident_reported` was `io.emit`, so one driver's photo raised a
+    full-screen ROAD OBSTRUCTION AHEAD on every handset — before any
+    dispatcher saw it, on trucks in other states, while nothing was blocked.
+    Report → `dispatchers` + `truck:<reporter>`. Approval → `dispatchers` +
+    every truck whose route crosses the closure. `scope` on the payload
+    (`awaiting_approval` / `verified`) is what makes the card's words match.
+19. **Truck heading comes from the road, not from two fixes.** A 5 m receiver
+    error on an 8 m leg is a 30° bearing error, and the marker is interpolated
+    so the drawn position is not the position that bearing was measured from.
+    `RouteTracker` projects the truck onto its route and takes the segment
+    bearing, keeping a cursor so it is a local search rather than a scan of
+    4,400 vertices. Fix-to-fix survives only as the fallback for a truck with
+    no active trip.

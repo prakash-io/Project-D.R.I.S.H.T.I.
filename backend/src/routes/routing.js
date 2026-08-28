@@ -1,8 +1,9 @@
 // Routing and trip endpoints (API-04).
 import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
-import { routeBetween } from '../services/routing.js';
-import { emitTo, ROUTE_ACK_EVENT } from '../sockets/telemetry.js';
+import { config } from '../config.js';
+import { routeBetween, routeAlternatives, blockedEdgeIds } from '../services/routing.js';
+import { emitTo, ROUTE_ACK_EVENT, TRIP_EVENT } from '../sockets/telemetry.js';
 
 export const routingRouter = Router();
 
@@ -15,16 +16,29 @@ export const routingRouter = Router();
  */
 routingRouter.post('/routes/plan', async (req, res, next) => {
   try {
-    const { from, to, risk_weight: riskWeight = 0 } = req.body ?? {};
+    const {
+      from, to, risk_weight: riskWeight = 0,
+      // How many DISTINCT routes to return. 1 -- the default -- keeps the old
+      // single-path behaviour and the old response shape exactly, so every
+      // existing caller is unaffected; the demo sidebar asks for more.
+      alternatives = 1,
+    } = req.body ?? {};
     for (const [name, point] of [['from', from], ['to', to]]) {
       if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) {
         return res.status(400).json({ error: `${name} must be {lat, lng}` });
       }
     }
+    // Clamped rather than trusted: each alternative is a full A* over the
+    // corridor, so an unbounded k is a request that never returns.
+    const k = Math.max(1, Math.min(Number(alternatives) || 1, 5));
 
-    let route;
+    let routes;
     try {
-      route = await routeBetween(from, to, { riskWeight: Number(riskWeight) || 0 });
+      routes = k === 1
+        ? [await routeBetween(from, to, { riskWeight: Number(riskWeight) || 0 })]
+          .filter(Boolean)
+        : await routeAlternatives(from, to,
+            { k, riskWeight: Number(riskWeight) || 0 });
     } catch (error) {
       // route_astar raises this rather than returning nothing, so the caller
       // can tell "unreachable" from "everything on the way is blocked".
@@ -33,16 +47,33 @@ routingRouter.post('/routes/plan', async (req, res, next) => {
       }
       throw error;
     }
-    if (!route) return res.status(404).json({ error: 'no route found', reachable: false });
+    if (routes.length === 0) {
+      return res.status(404).json({ error: 'no route found', reachable: false });
+    }
 
+    const [best] = routes;
     res.json({
-      distance_m: route.distanceM,
-      estimated_time_sec: route.durationSec,
-      edge_count: route.edges.length,
-      geometry: route.geometry,
+      distance_m: best.distanceM,
+      estimated_time_sec: best.durationSec,
+      edge_count: best.edges.length,
+      geometry: best.geometry,
+      // The whole set, best first. Present even when only one was asked for,
+      // so a client never has to branch on which shape it got back.
+      alternatives: routes.map(summariseRoute),
     });
   } catch (error) { next(error); }
 });
+
+/// One alternative, in the shape every client reads it in.
+function summariseRoute(route, index = 0) {
+  return {
+    rank: route.rank ?? index + 1,
+    distance_m: route.distanceM,
+    estimated_time_sec: route.durationSec,
+    edge_count: route.edges.length,
+    geometry: route.geometry,
+  };
+}
 
 /**
  * GET /routes/places -- the named endpoints a driver may type into the app.
@@ -162,7 +193,7 @@ routingRouter.get('/routes/corridors/:id', async (req, res, next) => {
  *
  * A truck has exactly ONE active trip when this returns. Any trip that was
  * still open is aborted first, and that is a correctness fix rather than
- * housekeeping: tripsUsingEdge() reroutes every active trip whose path uses a
+ * housekeeping: tripsUsingEdges() reroutes every active trip whose path crosses a
  * blocked edge, so a driver who had planned three routes during a shift would
  * receive three separate reroute proposals for one landslide, on three
  * different journeys, two of which they had already abandoned.
@@ -179,9 +210,34 @@ routingRouter.post('/trips', async (req, res, next) => {
       }
     }
 
-    let route;
+    // Plan every distinct route between the two ends, not just the best one.
+    //
+    // This is what a reroute later has to reroute ONTO. Until now a trip knew
+    // exactly one path, so when a hazard closed part of it the only thing the
+    // platform could do was ask A* for the cheapest way around the blocked
+    // edge -- which on the Guwahati corridor was a 7 m jog back onto the same
+    // highway. Knowing the alternatives up front is what makes "the next
+    // optimal route" a thing that exists.
+    //
+    // The set is also the answer to a question a dispatcher will ask about
+    // any reroute: was there anything else? A stored second alternative says
+    // yes and how much it costs; an empty set says the road is the only road.
+    let routes;
     try {
-      route = await routeBetween(from, to);
+      routes = await routeAlternatives(from, to, {
+        k: config.routeAlternatives,
+        // A trip must not be planned onto a road that is already shut. The
+        // 999999 view cost discourages it; this removes it.
+        avoidEdges: await blockedEdgeIds(),
+      });
+      // Nothing distinct came back, but that does not mean nothing is
+      // reachable -- a pair with one road between them legitimately yields
+      // one candidate, and a penalty search that rejects it still has to
+      // answer with the road. routeBetween is the plain question.
+      if (routes.length === 0) {
+        const single = await routeBetween(from, to);
+        routes = single ? [{ rank: 1, ...single }] : [];
+      }
     } catch (error) {
       // Same discrimination /routes/plan makes: an unreachable pair is the
       // driver's input being outside the extract, not a server fault.
@@ -190,7 +246,11 @@ routingRouter.post('/trips', async (req, res, next) => {
       }
       throw error;
     }
-    if (!route) return res.status(404).json({ error: 'no route found', reachable: false });
+    if (routes.length === 0) {
+      return res.status(404).json({ error: 'no route found', reachable: false });
+    }
+    // Rank 1 is what the truck drives. The rest are stored, not driven.
+    const route = routes[0];
 
     // One transaction: the window between "closed the old trip" and "opened
     // the new one" is a window in which recordTelemetry finds no active trip
@@ -212,7 +272,40 @@ routingRouter.post('/trips', async (req, res, next) => {
         [truckId, from.lng, from.lat, to.lng, to.lat, JSON.stringify(route.geometry),
          route.distanceM, route.durationSec],
       );
-      return { ...rows[0], superseded: superseded.rowCount };
+      const created = rows[0];
+
+      // The alternatives, in the same transaction as the trip they belong to.
+      // A trip whose alternative set was written separately could be read
+      // between the two writes as a trip with no alternatives -- which is
+      // indistinguishable from "there is only one road", the exact claim this
+      // whole change exists to stop the platform making by accident.
+      for (const [index, alt] of routes.entries()) {
+        await client.query(
+          `INSERT INTO trip_routes (trip_id, rank, geom, distance_m, duration_sec,
+                                    edge_ids, is_active)
+           VALUES ($1, $2, ST_GeomFromGeoJSON($3), $4, $5, $6::bigint[], $7)`,
+          [created.id, alt.rank ?? index + 1, JSON.stringify(alt.geometry),
+           alt.distanceM, alt.durationSec,
+           alt.edges.map((e) => Number(e.edgeId)).filter(Number.isFinite),
+           index === 0],
+        );
+      }
+
+      return { ...created, superseded: superseded.rowCount };
+    });
+
+    // The board learns what road this truck is on. Without this the console
+    // only ever saw moving dots: it drew the ten seeded corridors and the live
+    // vehicles and had nothing that joined a truck to the path it was driving,
+    // so two trucks on screen came with no route between them.
+    emitTo('dispatchers', TRIP_EVENT, {
+      trip_id: trip.id,
+      truck_id: truckId,
+      status: 'active',
+      geometry: route.geometry,
+      distance_m: route.distanceM,
+      estimated_time_sec: route.durationSec,
+      alternatives: routes.length,
     });
 
     res.status(201).json({
@@ -224,7 +317,102 @@ routingRouter.post('/trips', async (req, res, next) => {
       estimated_time_sec: route.durationSec,
       edge_count: route.edges.length,
       geometry: route.geometry,
+      // Every distinct road between these two ends, best first. The driver's
+      // client draws rank 1; the rest are what a reroute has to fall back on,
+      // and are quoted so the driver can be told there IS another way before
+      // anything goes wrong.
+      alternatives: routes.map(summariseRoute),
     });
+  } catch (error) { next(error); }
+});
+
+/**
+ * GET /trips/active -- what every truck in the fleet is currently driving.
+ *
+ * The console had no way to ask this. `GET /trucks` gives last known
+ * positions and `GET /trucks/:id` gives one truck's route, so a dispatcher
+ * watching eleven vehicles could see eleven dots and, to learn where any of
+ * them was going, had to leave the map. The result on screen was the bug
+ * report: trucks on a basemap with no route under them.
+ *
+ * Simplified for transport at 40 m, matching what the corridor overlay
+ * already sends. These paths run to 4,400 points each and eleven of them raw
+ * is several megabytes on every page load; 40 m of Douglas-Peucker is well
+ * inside the width the line is drawn at. NOT used for anything that follows
+ * the geometry vertex by vertex -- the handset asks for its own route
+ * unsimplified.
+ */
+routingRouter.get('/trips/active', async (req, res, next) => {
+  try {
+    const simplifyM = Math.max(0, Math.min(Number(req.query.simplify_m ?? 40) || 0, 500));
+    const geomSql = simplifyM > 0
+      ? `ST_AsGeoJSON(ST_Transform(ST_Simplify(
+           ST_Transform(t.planned_route, 3857), ${simplifyM}), 4326))::json`
+      : 'ST_AsGeoJSON(t.planned_route)::json';
+
+    const { rows } = await query(
+      `SELECT t.id AS trip_id, t.truck_id, tr.plate, t.started_at,
+              t.planned_distance_m, t.planned_duration_sec,
+              ST_Y(t.origin) AS origin_lat, ST_X(t.origin) AS origin_lng,
+              ST_Y(t.destination) AS destination_lat,
+              ST_X(t.destination) AS destination_lng,
+              -- Measured, not assumed: how far along its own route the truck
+              -- actually is, from the last fix. Null when there is no fix or
+              -- no geometry to locate one against.
+              CASE WHEN l.geom IS NOT NULL
+                   THEN ST_LineLocatePoint(t.planned_route, l.geom)
+              END AS progress,
+              (SELECT count(*)::int FROM trip_routes r WHERE r.trip_id = t.id)
+                AS alternative_count,
+              ${geomSql} AS geometry
+         FROM trips t
+         JOIN trucks tr ON tr.id = t.truck_id
+         LEFT JOIN truck_last_seen l ON l.truck_id = t.truck_id
+        WHERE t.status = 'active' AND t.planned_route IS NOT NULL
+        ORDER BY t.started_at DESC`);
+
+    res.json({
+      trips: rows.map((row) => ({
+        ...row,
+        progress: row.progress === null ? null : Number(row.progress),
+      })),
+      simplify_m: simplifyM,
+    });
+  } catch (error) { next(error); }
+});
+
+/**
+ * GET /trips/:id/alternatives -- every road this trip could have taken.
+ *
+ * Ranked, with the active one flagged. `blocked` is computed against the
+ * currently closed edges rather than stored, because a route's availability
+ * is a fact about the world right now and caching it is how a dispatcher gets
+ * offered a detour down a road that shut an hour ago.
+ */
+routingRouter.get('/trips/:id/alternatives', async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT r.rank, r.distance_m, r.duration_sec, r.is_active,
+              cardinality(r.edge_ids) AS edge_count,
+              EXISTS (
+                SELECT 1 FROM incident_blocked_edges be
+                  JOIN incidents i ON i.id = be.incident_id
+                 WHERE i.status = 'verified' AND be.edge_id = ANY(r.edge_ids)
+              ) OR EXISTS (
+                SELECT 1 FROM incidents i
+                 WHERE i.status = 'verified' AND i.blocked_edge = ANY(r.edge_ids)
+              ) AS blocked,
+              ST_AsGeoJSON(ST_Transform(ST_Simplify(
+                ST_Transform(r.geom, 3857), 40), 4326))::json AS geometry
+         FROM trip_routes r
+        WHERE r.trip_id = $1
+        ORDER BY r.rank`,
+      [req.params.id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'no stored routes for that trip' });
+    }
+    res.json({ trip_id: req.params.id, alternatives: rows });
   } catch (error) { next(error); }
 });
 
@@ -259,10 +447,16 @@ routingRouter.post('/reroutes/:id/ack', async (req, res, next) => {
       // answered twice (a flaky link, the driver double-tapping) must not
       // restore the previous route on top of an already-applied acceptance.
       const { rows } = await client.query(
-        `SELECT id, trip_id, driver_response,
-                previous_route IS NOT NULL AS has_previous,
-                previous_distance_m, previous_duration_sec
-           FROM reroutes WHERE id = $1 FOR UPDATE`,
+        // truck_id comes along because the dispatcher board keys its routes by
+        // truck, not by trip. Without it a declined detour arrived as a trip
+        // id the console had no index on, so the board kept drawing a truck on
+        // a road its driver had just refused.
+        `SELECT r.id, r.trip_id, t.truck_id, r.driver_response,
+                r.previous_route IS NOT NULL AS has_previous,
+                r.previous_distance_m, r.previous_duration_sec
+           FROM reroutes r
+           JOIN trips t ON t.id = r.trip_id
+          WHERE r.id = $1 FOR UPDATE OF r`,
         [req.params.id]);
       if (rows.length === 0) return { status: 404, body: { error: 'no such reroute' } };
 
@@ -273,8 +467,8 @@ routingRouter.post('/reroutes/:id/ack', async (req, res, next) => {
         // routine, changing your mind after the fact is not something this
         // endpoint can honour.
         return reroute.driver_response === response
-          ? { status: 200, body: { reroute_id: reroute.id, driver_response: response,
-              duplicate: true } }
+          ? { status: 200, body: { reroute_id: reroute.id, trip_id: reroute.trip_id,
+              truck_id: reroute.truck_id, driver_response: response, duplicate: true } }
           : { status: 409, body: { error: `already ${reroute.driver_response}` } };
       }
 
@@ -296,6 +490,7 @@ routingRouter.post('/reroutes/:id/ack', async (req, res, next) => {
       }
       return { status: 200,
         body: { reroute_id: reroute.id, trip_id: reroute.trip_id,
+          truck_id: reroute.truck_id,
           driver_response: response, route_restored: restored } };
     });
 

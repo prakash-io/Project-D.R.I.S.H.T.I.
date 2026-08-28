@@ -108,14 +108,26 @@ async function main() {
   // The dashboard learns about new reports over Socket.IO. A report that is
   // stored but never announced is invisible until a manual refresh, which on
   // a command centre board is the same as not arriving.
+  //
+  // JOINS `dispatchers`, exactly as the console does on connect. It did not
+  // used to have to: `incident_reported` was emitted to every connected
+  // socket, so any listener at all received it -- which is precisely the
+  // defect that let one driver's unreviewed photograph raise a full-screen
+  // hazard alert on every other handset in the fleet. Delivery is scoped by
+  // room now, so a test client that never subscribes is modelling a client
+  // that does not exist. The property asserted below is unchanged: the board
+  // is told without a refresh.
   const socket = ioClient(API, { transports: ['websocket'] });
   const announced = [];
   socket.on('incident_reported', (p) => announced.push(p));
   await new Promise((resolve, reject) => {
-    socket.once('connect', resolve);
+    socket.once('connect', () => { socket.emit('subscribe', { room: 'dispatchers' }); resolve(); });
     socket.once('connect_error', reject);
     setTimeout(() => reject(new Error('socket never connected')), 5000);
   });
+  // The join is a server-side effect of an event with no acknowledgement, so
+  // it has to land before the report is filed or the emit races the room.
+  await sleep(250);
 
   const report = await api('POST', '/incidents/report', form, true);
   assert.ok([201, 202].includes(report.status),

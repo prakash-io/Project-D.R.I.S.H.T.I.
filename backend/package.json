@@ -13,7 +13,8 @@
     "test": "node --test test/",
     "verify:e2e": "node test/e2e_verify.mjs",
     "verify:reroute": "node test/reroute_proposal_verify.mjs",
-    "verify:visibility": "node test/incident_visibility_verify.mjs"
+    "verify:visibility": "node test/incident_visibility_verify.mjs",
+    "verify:alternatives": "node test/route_alternatives_verify.mjs"
   },
   "dependencies": {
     "bullmq": "^5.34.0",

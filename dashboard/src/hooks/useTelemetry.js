@@ -18,7 +18,17 @@ import { API_URL } from '../lib/api';
 /// makes the next leg start from wherever the marker had reached.
 const INTERPOLATION_MS = 1000;
 
-export function useTelemetry({ onRouteUpdated, onIncident } = {}) {
+export function useTelemetry({
+  onRouteUpdated, onIncident, onTripRoute, onRerouteAck,
+  // The fleet's routes, keyed by truck id, each carrying a RouteTracker.
+  //
+  // A REF, deliberately. This is read on every animation frame to orient the
+  // 3D models, and taking it as a normal prop would put it in this effect's
+  // dependency list -- which would tear down and rebuild the socket every
+  // time a truck was rerouted, dropping telemetry each time. The effect below
+  // is mount-only and has to stay that way.
+  routesRef,
+} = {}) {
   const [trucks, setTrucks] = useState([]);
   const [connected, setConnected] = useState(false);
   const [packets, setPackets] = useState(0);
@@ -66,6 +76,15 @@ export function useTelemetry({ onRouteUpdated, onIncident } = {}) {
         // measured, which is the same class of error the interpolation comment
         // above refuses for position.
         //
+        // This is now the FALLBACK, not the answer. A truck on a planned
+        // route takes its heading from the road (see the tick loop below):
+        // two consecutive 1 Hz fixes carry enough receiver noise that their
+        // bearing swings tens of degrees on a vehicle driving dead straight,
+        // and the marker being interpolated means the position on screen is
+        // rarely the position that bearing was measured from. The road has
+        // neither problem. This still runs, because a truck with no active
+        // trip has no road to be pointed along.
+        //
         // Derived, and therefore never sent onward or persisted: this is a
         // rendering property of two consecutive fixes, not telemetry.
         heading: headingFor(existing, current, next),
@@ -75,13 +94,38 @@ export function useTelemetry({ onRouteUpdated, onIncident } = {}) {
 
     if (onRouteUpdated) socket.on('route_updated', onRouteUpdated);
     if (onIncident) socket.on('incident_reported', onIncident);
+    if (onTripRoute) socket.on('trip_route', onTripRoute);
+    if (onRerouteAck) socket.on('reroute_ack', onRerouteAck);
 
     const tick = () => {
       const now = performance.now();
       const snapshot = [];
       store.current.forEach((truck) => {
         const position = interpolate(truck, now);
-        snapshot.push({ ...truck, position: [position.lng, position.lat] });
+
+        // Point the vehicle along the ROAD it is on, at the position it is
+        // being drawn at -- not along the line between its last two fixes.
+        //
+        // Computed here, per frame, rather than once per packet, because the
+        // marker is interpolated: over a 1 Hz leg it slides through a bend,
+        // and a heading fixed at packet time would have it enter the curve
+        // already facing the exit. The tracker keeps a cursor along the path,
+        // so this is a short local search and not a scan of 4,400 vertices.
+        const tracker = routesRef?.current?.get(truck.truck_id)?.tracker;
+        const onRoute = tracker?.headingAt(position.lng, position.lat) ?? null;
+
+        snapshot.push({
+          ...truck,
+          position: [position.lng, position.lat],
+          // The fix-derived bearing survives as the fallback for a truck with
+          // no active trip, or one that has wandered further off its route
+          // than the tracker will vouch for.
+          heading: onRoute ?? truck.heading,
+          // Which of the two answered, so nothing downstream has to guess
+          // whether a heading is measured against a road or inferred from two
+          // noisy fixes.
+          heading_source: onRoute === null ? 'fixes' : 'route',
+        });
       });
       setTrucks(snapshot);
       frame.current = requestAnimationFrame(tick);

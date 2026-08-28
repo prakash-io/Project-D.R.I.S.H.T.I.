@@ -54,6 +54,7 @@ export default function ControlBar({
   showRisk, setShowRisk,
   riskCount, riskLoading, threshold,
   showCorridors, setShowCorridors, corridorCount, corridorLoading,
+  showFleetRoutes, setShowFleetRoutes, fleetRouteCount, fleetRouteLoading,
 }) {
   return (
     <header className="crt relative z-10 flex items-stretch border-b border-edge bg-panel">
@@ -77,6 +78,17 @@ export default function ControlBar({
           onChange={setShowRisk}
           tone="danger"
           badge={riskLoading ? '…' : riskCount}
+        />
+        {/* Placed before Corridors, because it is the more specific claim:
+            "Routes" is what the fleet is driving right now, "Corridors" is the
+            fixed geography it drives over. A dispatcher scanning left to right
+            meets units, then their roads, then the map they sit on. */}
+        <Toggle
+          label="Routes"
+          checked={showFleetRoutes}
+          onChange={setShowFleetRoutes}
+          tone="live"
+          badge={fleetRouteLoading ? '…' : fleetRouteCount}
         />
         <Toggle
           label="Corridors"

@@ -27,10 +27,12 @@ export default function CommandCenter({
   incidents, approve, reject, busyId, incidentError,
   features, riskLoading, threshold,
   corridors, corridorLoading,
+  fleetRoutes, fleetRouteLoading,
   demo,
   showTrucks, setShowTrucks,
   showRisk, setShowRisk,
   showCorridors, setShowCorridors,
+  showFleetRoutes, setShowFleetRoutes,
   selectedTruck, setSelectedTruck,
 }) {
   const dr = selectedTruck?.source === 'ekf';
@@ -63,6 +65,10 @@ export default function CommandCenter({
           setShowCorridors={setShowCorridors}
           corridorCount={corridors.length}
           corridorLoading={corridorLoading}
+          showFleetRoutes={showFleetRoutes}
+          setShowFleetRoutes={setShowFleetRoutes}
+          fleetRouteCount={fleetRoutes.length}
+          fleetRouteLoading={fleetRouteLoading}
         />
 
         <div className="flex min-h-0 flex-1">
@@ -82,6 +88,9 @@ export default function CommandCenter({
                 corridors={corridors}
                 showCorridors={showCorridors}
                 activeRoute={demo.route}
+                fleetRoutes={fleetRoutes}
+                showFleetRoutes={showFleetRoutes}
+                selectedTruckId={selectedTruck?.truck_id}
               />
             </ErrorBoundary>
 

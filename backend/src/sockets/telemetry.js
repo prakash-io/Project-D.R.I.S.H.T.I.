@@ -11,6 +11,11 @@ import { query } from '../db.js';
 export const TELEMETRY_EVENT = 'truck_location_update';
 export const ROUTE_EVENT = 'route_updated';
 export const INCIDENT_EVENT = 'incident_reported';
+/// A trip was opened (or replanned) on a route. Dispatchers only: this is how
+/// the board learns what road each truck is actually driving, which it had no
+/// way to know at all -- the map drew ten static corridors and the live
+/// vehicles, and nothing joined the two.
+export const TRIP_EVENT = 'trip_route';
 /// The driver's answer to a reroute proposal, fanned out to dispatchers only.
 /// A refused detour is the urgent case: that truck is still driving at the
 /// hazard, and the board must not show it on a road it declined.
@@ -55,8 +60,30 @@ export function emitTo(room, event, payload) {
   if (io) io.to(room).emit(event, payload);
 }
 
-export function broadcast(event, payload) {
-  if (io) io.emit(event, payload);
+/**
+ * Deliver one event to a named set of rooms, once each.
+ *
+ * This replaced a `broadcast()` helper that was `io.emit` -- every connected
+ * socket -- and the replacement is the fix for a real defect, not a tidy-up.
+ * `incident_reported` went through it, so the instant ANY driver uploaded a
+ * photo, every handset in the fleet raised a full-screen ROAD OBSTRUCTION
+ * AHEAD modal: before a dispatcher had seen the report, on trucks hundreds of
+ * kilometres away, about roads the hazard had nothing to do with, while
+ * nothing was blocked at all. There is no longer a function here that can
+ * reach the whole fleet at once; the rooms have to be named.
+ *
+ * A set rather than a loop at each call site, because the sets overlap. A
+ * hazard approval goes to the dispatchers, to every driver whose route
+ * crosses the closure, and to the driver who reported it -- and that last one
+ * is usually also in the second group. Socket.IO's `to()` accumulates rooms
+ * and de-duplicates the sockets across them, so the driver who reported the
+ * landslide they are now being rerouted around gets one alert, not two.
+ */
+export function emitToMany(rooms, event, payload) {
+  if (!io) return;
+  const unique = [...new Set((rooms ?? []).filter(Boolean))];
+  if (unique.length === 0) return;
+  io.to(unique).emit(event, payload);
 }
 
 /**

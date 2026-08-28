@@ -23,6 +23,7 @@ function riskColor(score) {
 export default function MapView({
   trucks, riskFeatures, showRisk, showTrucks, onTruckClick,
   corridors, showCorridors, activeRoute,
+  fleetRoutes, showFleetRoutes, selectedTruckId,
 }) {
   const layers = useMemo(() => {
     const built = [];
@@ -58,6 +59,55 @@ export default function MapView({
         capRounded: true,
         jointRounded: true,
         pickable: true,
+      }));
+    }
+
+    // The road each truck is actually driving.
+    //
+    // This is the layer the console did not have. It drew the ten seeded
+    // corridors and it drew the live vehicles, and nothing joined a truck to
+    // the path it was on -- so the map showed trucks sitting on an empty
+    // basemap, which is the bug as reported. The data existed the whole time
+    // (trips.planned_route, one row per active trip); there was no endpoint
+    // that returned it for the fleet and no layer that drew it.
+    //
+    // ABOVE the corridors, BELOW the risk segments. That follows the rule the
+    // corridor comment sets out rather than breaking it: what a dispatcher is
+    // scanning for must not be hidden by what is merely present. A live route
+    // is being read; a corridor is context; a red risk segment is the alert
+    // and stays on top of both.
+    //
+    // Coloured per truck, from the same truckRgb every other truck-shaped
+    // thing on this console calls. That is the whole reason this reads at a
+    // glance: the line under a vehicle is the same hue as the vehicle, so
+    // two trucks converging on Guwahati come with two distinguishable paths
+    // rather than one anonymous tangle.
+    //
+    // Alpha, not width, separates a route from the corridor beneath it. The
+    // 2D dot is 5 px and the corridor is 3 px; a fleet route heavier than
+    // either would turn eleven active trips into a solid mat.
+    if (showFleetRoutes && fleetRoutes?.length > 0) {
+      built.push(new PathLayer({
+        id: 'fleet-routes',
+        data: fleetRoutes,
+        getPath: (r) => r.coordinates,
+        // Dimmed unless this is the selected truck. With eleven trucks on the
+        // Guwahati corridor every line overlaps every other, and a dispatcher
+        // who has clicked one vehicle is asking about that vehicle's road.
+        getColor: (r) => {
+          const [red, green, blue] = truckRgb(r.truck_id);
+          const selected = !selectedTruckId || r.truck_id === selectedTruckId;
+          return [red, green, blue, selected ? 230 : 70];
+        },
+        widthUnits: 'pixels',
+        getWidth: (r) => (r.truck_id === selectedTruckId ? 4 : 2.5),
+        capRounded: true,
+        jointRounded: true,
+        pickable: true,
+        updateTriggers: {
+          getColor: [fleetRoutes, selectedTruckId],
+          getWidth: selectedTruckId,
+        },
       }));
     }
 
@@ -232,7 +282,7 @@ export default function MapView({
 
     return built;
   }, [trucks, riskFeatures, showRisk, showTrucks, onTruckClick, corridors,
-      showCorridors, activeRoute]);
+      showCorridors, activeRoute, fleetRoutes, showFleetRoutes, selectedTruckId]);
 
   return (
     <DeckGL
@@ -245,7 +295,31 @@ export default function MapView({
       layers={layers}
       getTooltip={({ object }) => {
         if (!object) return null;
-        // Corridor first: it also carries a `name`, so testing it after the
+        // A fleet route first of all. It carries `truck_id`, so it has to be
+        // tested before the truck branch or hovering a line would report the
+        // vehicle's speed and dead-reckoning state -- which are true of the
+        // truck and say nothing about the road under the cursor.
+        if (object.coordinates && object.truck_id) {
+          const km = Number.isFinite(object.distance_m)
+            ? `${(object.distance_m / 1000).toFixed(0)} km` : 'distance unknown';
+          const eta = Number.isFinite(object.duration_sec)
+            ? ` · ${Math.round(object.duration_sec / 3600)} h` : '';
+          const done = Number.isFinite(object.progress)
+            ? `\n${Math.round(object.progress * 100)}% complete` : '';
+          const alts = object.alternative_count > 1
+            ? `\n${object.alternative_count - 1} alternative route`
+              + `${object.alternative_count > 2 ? 's' : ''}` : '';
+          // Flagged, not silently drawn: a detour the driver has not answered
+          // is a proposal, and one that could not avoid the closure is a truck
+          // being sent through it.
+          const state = object.avoids_closure === false ? '\nNO CLEAR DETOUR'
+            : object.proposed ? '\nAWAITING DRIVER' : '';
+          return {
+            text: `${object.plate ?? object.truck_id.slice(0, 8)}\n`
+              + `${km}${eta}${done}${alts}${state}`,
+          };
+        }
+        // Corridor next: it also carries a `name`, so testing it after the
         // risk branch would be fine but after the truck branch would not.
         if (object.origin_name) {
           return {

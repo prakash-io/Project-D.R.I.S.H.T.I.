@@ -19,7 +19,22 @@ const KIND_TITLE = {
 export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap }) {
   if (!incident) return null;
 
-  const title = KIND_TITLE[incident.kind] ?? 'VERIFIED HAZARD AHEAD';
+  // Whose hazard is this: one a dispatcher has approved and that now closes a
+  // road, or this driver's own report on its way to be looked at?
+  //
+  // The card could not tell the difference before, because the backend
+  // broadcast every report to every handset the instant it was uploaded. So a
+  // driver who had just photographed a landslide was shown ROAD OBSTRUCTION
+  // AHEAD / "Reported by dispatch on your route" about their own photograph,
+  // and so was every other truck in the fleet -- for a report no human had
+  // seen and that was blocking nothing. Delivery is now scoped by room; this
+  // is what makes the words match.
+  const awaiting = incident.scope === 'awaiting_approval'
+    || incident.requires_approval === true;
+
+  const title = awaiting
+    ? 'HAZARD REPORT SENT'
+    : KIND_TITLE[incident.kind] ?? 'VERIFIED HAZARD AHEAD';
 
   // What the detour costs, straight from the figures the backend computed on
   // the road graph -- `delta_distance_m` and `delta_time_sec` off the reroute,
@@ -51,10 +66,14 @@ export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap
     return `${rounded > 0 ? '+' : '−'}${Math.abs(rounded)} ${unit}`;
   };
 
+  // A report awaiting a dispatcher has no detour to cost, and "COSTING…" on
+  // it is a promise of a number that is not coming: nothing will be routed
+  // around this hazard until a human approves it. Say what is actually true.
+  const pending = awaiting ? 'ON REVIEW' : 'COSTING…';
   const delayText = delayMin != null ? signed(delayMin, 'MIN')
-    : costed ? 'NO DELAY' : 'COSTING…';
+    : costed ? 'NO DELAY' : pending;
   const distanceText = extraKm != null ? signed(extraKm, 'KM')
-    : costed ? 'SAME' : 'COSTING…';
+    : costed ? 'SAME' : pending;
 
   return (
     <Modal visible transparent animationType="fade"
@@ -67,15 +86,21 @@ export default function IncidentModal({ incident, spokenBy, onDismiss, onViewMap
           accessibilityRole="alert"
         >
           <View style={styles.iconWrap}>
-            <Icon name="warning" size={30} color={t.color.alertText}
-                  importantForAccessibility="no" />
+            {/* A warning triangle on a driver's OWN unreviewed report reads as
+                "there is a hazard ahead of you", which is not what happened --
+                what happened is that they sent a photograph. */}
+            <Icon name={awaiting ? 'cloud-upload' : 'warning'} size={30}
+                  color={t.color.alertText} importantForAccessibility="no" />
           </View>
 
           <Text style={styles.title}>{title}</Text>
 
           <Text style={styles.body}>
             {incident.message
-              ?? 'Reported by dispatch on your route. Slow down and proceed with caution.'}
+              ?? (awaiting
+                ? 'Your photo is with dispatch. Keep driving with care — other '
+                  + 'drivers are warned, and any detour is offered, once it is approved.'
+                : 'Reported by dispatch on your route. Slow down and proceed with caution.')}
           </Text>
 
           <View style={styles.stats}>

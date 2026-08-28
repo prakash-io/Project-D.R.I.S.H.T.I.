@@ -207,6 +207,28 @@ export default function App() {
 
         onIncident: async (payload) => {
           if (disposed) return;
+
+          // An unapproved report is addressed to the driver who SENT it and
+          // to nobody else. The backend enforces that by room -- it emits to
+          // `truck:<reporter>` and to the dispatchers rather than broadcasting
+          // -- and this is the second lock on the same door: a handset running
+          // against an older server, or against one where the scoping was
+          // reverted, still refuses to raise a full-screen hazard alert about
+          // a photograph another driver just uploaded.
+          //
+          // The check is on the REPORTER, not on the scope alone, because
+          // "awaiting approval" is exactly the state in which the reporter
+          // does want their receipt.
+          const unapproved = payload?.scope === 'awaiting_approval'
+            || payload?.requires_approval === true;
+          const mine = payload?.reported_by_truck === TRUCK_ID
+            || payload?.reported_by === TRUCK_ID;
+          if (unapproved && payload?.reported_by_truck !== undefined && !mine) {
+            log('INFO', 'HAZARD_SKIP',
+                'Another driver filed a report; waiting for dispatch to approve it.');
+            return;
+          }
+
           // Attach the detour figures if this hazard has already been costed
           // for us. `costed` distinguishes "no detour exists" from "the detour
           // is still being calculated", which the card has to say differently:
@@ -214,7 +236,11 @@ export default function App() {
           // zero or not yet.
           setIncident({ ...payload, ...(rerouteCost.current.get(payload?.id) ?? {}) });
           setSpokenBy(null);
-          log('WARN', 'HAZARD_RX', `Dispatch reported ${payload?.kind ?? 'a hazard'} ahead.`);
+          log(unapproved ? 'INFO' : 'WARN',
+              unapproved ? 'HAZARD_SENT' : 'HAZARD_RX',
+              unapproved
+                ? `Your ${payload?.kind ?? 'hazard'} report is with dispatch.`
+                : `Dispatch confirmed ${payload?.kind ?? 'a hazard'} ahead.`);
           if (Number.isFinite(payload?.lat) && Number.isFinite(payload?.lng)) {
             setHazards((current) => [
               ...current.filter((h) => h.id !== payload.id),
@@ -905,6 +931,14 @@ function hazardSentence(payload) {
   const noun = kind === 'landslide' ? 'Landslide'
     : kind === 'flood' ? 'Flooding'
       : 'Road obstruction';
+  // A driver's OWN report, before any dispatcher has seen it, is not a warning
+  // about the road ahead -- it is a receipt for the photograph they just sent.
+  // Reading it out as "Warning: landslide reported ahead" was the audible half
+  // of the same defect the modal had: the app telling the person standing at
+  // the landslide about the landslide, in an alert voice, on their own upload.
+  if (payload?.scope === 'awaiting_approval' || payload?.requires_approval === true) {
+    return `${noun} report sent to dispatch. You will be told if a detour is approved.`;
+  }
   return `Warning: ${noun} reported ahead. Slow down and proceed with caution.`;
 }
 

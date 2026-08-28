@@ -23,6 +23,7 @@ import { useTelemetry } from './hooks/useTelemetry';
 import { useIncidents } from './hooks/useIncidents';
 import { useRiskSegments } from './hooks/useRiskSegments';
 import { useCorridors } from './hooks/useCorridors';
+import { useFleetRoutes } from './hooks/useFleetRoutes';
 import { useDemoRoute } from './hooks/useDemoRoute';
 import { useHazardAlerts } from './hooks/useHazardAlerts';
 import { useFleetRoster } from './hooks/useFleetRoster';
@@ -38,14 +39,51 @@ export default function App() {
   // On by default: with no truck moving, the corridors are the only thing
   // that tells a dispatcher opening the console what this platform routes.
   const [showCorridors, setShowCorridors] = useState(true);
+  // On by default, and this is the more important of the two route layers: a
+  // dispatcher opening the console needs to see where the fleet is GOING, not
+  // only where it is. The map used to answer only the second question.
+  const [showFleetRoutes, setShowFleetRoutes] = useState(true);
   const [incidentPing, setIncidentPing] = useState(null);
   const [selectedTruck, setSelectedTruck] = useState(null);
 
   const onIncident = useCallback((payload) => setIncidentPing(payload), []);
-  const { trucks, connected, packets } = useTelemetry({ onIncident });
+
+  // Declared BEFORE useTelemetry: the socket effect subscribes this hook's
+  // three handlers, and it runs once on mount, so they have to exist by then.
+  // All three are useCallback([]) over refs for the same reason -- a handler
+  // whose identity changed would not be re-bound anyway, since that effect
+  // deliberately does not depend on them.
+  const fleetRoutes = useFleetRoutes();
+
+  const { trucks, connected, packets } = useTelemetry({
+    onIncident,
+    onTripRoute: fleetRoutes.onTripRoute,
+    onRouteUpdated: fleetRoutes.onRouteUpdated,
+    onRerouteAck: fleetRoutes.onRerouteAck,
+    // The map's 3D models take their heading from the road under them, which
+    // means the render loop needs the routes. Passed as the ref rather than
+    // the array so the socket is never rebuilt when a truck is rerouted.
+    routesRef: fleetRoutes.byTruck,
+  });
   const { incidents, approve, reject, busyId, error } = useIncidents(incidentPing);
   const { corridors, loading: corridorLoading } = useCorridors();
   const demo = useDemoRoute();
+
+  // A dispatcher approving a hazard reroutes trucks. Re-fetching the fleet's
+  // routes afterwards is belt-and-braces over the `route_updated` events that
+  // already arrive: a socket that reconnected mid-approval would otherwise
+  // leave the board drawing roads nobody is on any more.
+  //
+  // Bound to `refresh` and not to the hook's return object -- that object is a
+  // fresh literal every render, so closing over it would give this callback a
+  // new identity on every frame of the telemetry loop and re-render the
+  // incident panel sixty times a second.
+  const refreshRoutes = fleetRoutes.refresh;
+  const approveAndRefresh = useCallback(async (id) => {
+    const result = await approve(id);
+    refreshRoutes();
+    return result;
+  }, [approve, refreshRoutes]);
 
   // Fetched when the overlay is on OR the analytics page is open, so the two
   // consumers share one request instead of each holding their own copy of a
@@ -102,7 +140,7 @@ export default function App() {
                 connected={connected}
                 packets={packets}
                 incidents={incidents}
-                approve={approve}
+                approve={approveAndRefresh}
                 reject={reject}
                 busyId={busyId}
                 incidentError={error}
@@ -118,6 +156,10 @@ export default function App() {
                 setShowRisk={setShowRisk}
                 showCorridors={showCorridors}
                 setShowCorridors={setShowCorridors}
+                fleetRoutes={fleetRoutes.routes}
+                fleetRouteLoading={fleetRoutes.loading}
+                showFleetRoutes={showFleetRoutes}
+                setShowFleetRoutes={setShowFleetRoutes}
                 selectedTruck={selectedTruck}
                 setSelectedTruck={setSelectedTruck}
               />
