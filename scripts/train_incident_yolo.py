@@ -163,6 +163,7 @@ def link_negatives(negatives_dir: Path, dst: Path) -> dict[str, int]:
     return dict(counts)
 
 
+
 def read_classes(src: Path) -> list[str]:
     """Class names in `data.yaml` order -- the order is the label contract."""
     spec = yaml.safe_load((src / "data.yaml").read_text())
@@ -269,10 +270,13 @@ def main() -> int:
     ap.add_argument("--imgsz", type=int, default=224)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--device", default=None, help="mps | cpu | 0 (default: auto)")
-    ap.add_argument("--label-source", choices=("pool", "file"), default="pool",
+    ap.add_argument("--label-source", choices=("pool", "file", "prebuilt"),
+                    default="pool",
                     help="'pool' (default) = 2 content-derived classes; "
                          "'file' = the 4 shipped labels, 2 of which are index "
-                         "arithmetic rather than image content")
+                         "arithmetic rather than image content; "
+                         "'prebuilt' = train --cls-dir as it already stands, "
+                         "built by scripts/build_vision_dataset.py")
     ap.add_argument("--negatives", type=Path, default=DEFAULT_NEGATIVES,
                     help="directory of NORMAL_TERRAIN images; pass --no-negatives "
                          "to reproduce the old two-class model")
@@ -284,6 +288,37 @@ def main() -> int:
     args = ap.parse_args()
 
     t0 = time.time()
+
+    if args.label_source == "prebuilt":
+        # The v2 ground-level dataset is assembled by a separate script,
+        # because its work -- cross-class dedup, perceptual near-duplicate
+        # clustering, group-wise splitting -- has nothing to do with reading
+        # YOLO detection labels, which is all this script's tree builder does.
+        # Here the tree is taken as given and only trained.
+        if not args.cls_dir.is_dir():
+            sys.exit(f"error: {args.cls_dir} not found -- run "
+                     f"scripts/build_vision_dataset.py first")
+        classes = sorted(p.name for p in (args.cls_dir / "train").iterdir()
+                         if p.is_dir())
+        declared = classes
+        stats = {}
+        for split in SPLITS:
+            counts = {}
+            for name in classes:
+                folder = args.cls_dir / split / name
+                counts[name] = sum(1 for p in folder.iterdir()
+                                   if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+                                   ) if folder.is_dir() else 0
+            stats[split] = {"counts": counts, "total": sum(counts.values()),
+                            "skipped": []}
+            detail = "  ".join(f"{c}={counts[c]}" for c in classes)
+            print(f"  {split:5} {sum(counts.values()):4} images   {detail}")
+        print(f"==> label source 'prebuilt': {len(classes)} classes {classes}")
+        if args.prepare_only:
+            print("==> --prepare-only, stopping")
+            return 0
+        return train_and_export(args, classes, declared, stats, t0)
+
     declared = read_classes(args.src)
     negatives_dir: Path | None = None
     if not args.no_negatives:
@@ -326,9 +361,29 @@ def main() -> int:
         print("==> --prepare-only, stopping")
         return 0
 
+    return train_and_export(args, classes, declared, stats, t0, negatives_dir)
+
+
+def train_and_export(args, classes: list[str], declared: list[str],
+                     stats: dict, t0: float,
+                     negatives_dir: Path | None = None) -> int:
+    """Fine-tune yolov8n-cls on `args.cls_dir` and write weights + metadata.
+
+    Split out from `main` so the tree can be produced either by this script's
+    own detection-label converter or by `build_vision_dataset.py`, without two
+    copies of the training and export logic drifting apart.
+
+    `negatives_dir` is passed explicitly rather than read from the enclosing
+    scope: it is a local of `main`, and the metadata block below cites it. It
+    stays None on the `prebuilt` path, where the negatives are already baked
+    into the tree by `build_vision_dataset.py` and there is no separate
+    directory to name.
+    """
     import torch
     from ultralytics import YOLO
 
+    run_name = ("incident-cls" if args.label_source != "prebuilt"
+                else "incident-cls-v2")
     device = args.device
     if device is None:
         device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -346,7 +401,10 @@ def main() -> int:
         batch=args.batch,
         device=device,
         project=str(ROOT / "data" / "artifacts" / "vision" / "runs"),
-        name="incident-cls",
+        # Namespaced by label source so a v2 ground-level run cannot silently
+        # overwrite the v1 satellite run's artefacts -- the two are being
+        # compared against each other, so both have to survive.
+        name=run_name,
         exist_ok=True,
         seed=20260825,
         # The classes are heavily skewed, so the checkpoint is selected on
@@ -363,7 +421,7 @@ def main() -> int:
     metrics = model.val(data=str(args.cls_dir), split="test", device=device,
                         verbose=False,
                         project=str(ROOT / "data" / "artifacts" / "vision" / "runs"),
-                        name="incident-cls-test", exist_ok=True)
+                        name=f"{run_name}-test", exist_ok=True)
 
     # Per-class accuracy from an explicit pass, because ultralytics'
     # classification validator reports only top-1/top-5 overall.
