@@ -1,0 +1,217 @@
+# Ground-level subset of data/raw/vision/drive_drop -- one filename per line.
+#
+# The drop is 760 images and was recorded as "real ground-level flood
+# photographs". It is not: reviewed exhaustively as eight 100-tile contact
+# sheets (scripts/contact_sheet.py), it is blocked by imaging modality.
+#
+#     sorted index    modality
+#     0-69            ground level, US            usable
+#     70-369          aerial / drone              not usable
+#     370-512         ground level, European      usable
+#     513-759         aerial, TV screengrabs,     not usable
+#                     stock-watermarked
+#
+# Only the ground-level images are listed here. That is the viewpoint
+# /verify-incident is actually sent -- a driver standing in front of a
+# blocked road -- and mixing aerial in would keep "is this an aerial shot"
+# a perfect separating feature against the ground-level NORMAL and
+# LANDSLIDE classes. Trading one modality shortcut for another is not a fix.
+#
+# Also dropped inside the usable ranges: frames with no flood in them at all
+# (a dry road under a ROAD CLOSED sign, construction trucks on dry dirt, a
+# dry highway through a windscreen), two indoor shots, a quarry, and
+# elevated townscape views over Passau that no driver would photograph.
+#
+# Regenerate the evidence with:
+#   scripts/contact_sheet.py --src data/raw/vision/drive_drop \
+#       --start 0 --n 100 --cols 10 --tile 150 --label --out sheet.jpg
+Flood_1000.jpg
+Flood_1002.jpg
+Flood_1011.jpg
+Flood_1012.jpg
+Flood_1021.jpg
+Flood_1023.jpg
+Flood_1025.jpg
+Flood_1027.jpg
+Flood_1028.jpg
+Flood_1029.jpg
+Flood_1030.jpg
+Flood_1032.jpg
+Flood_1034.jpg
+Flood_1036.jpg
+Flood_1040.jpg
+Flood_1043.jpg
+Flood_1044.jpg
+Flood_1045.jpg
+Flood_1047.jpg
+Flood_1048.jpg
+Flood_1049.jpg
+Flood_1051.jpg
+Flood_1052.jpg
+Flood_1053.jpg
+Flood_1054.jpg
+Flood_1055.jpg
+Flood_1056.jpg
+Flood_1058.jpg
+Flood_1059.jpg
+Flood_1060.jpg
+Flood_1061.jpg
+Flood_1063.jpg
+Flood_1064.jpg
+Flood_1065.jpg
+Flood_1067.jpg
+Flood_1068.jpg
+Flood_1069.jpg
+Flood_1070.jpg
+Flood_1071.jpg
+Flood_1072.jpg
+Flood_1074.jpg
+Flood_1075.jpg
+Flood_1076.jpg
+Flood_1077.jpg
+Flood_1078.jpg
+Flood_1079.jpg
+Flood_1080.jpg
+Flood_1081.jpg
+Flood_1082.jpg
+Flood_1083.jpg
+Flood_1084.jpg
+Flood_1085.jpg
+Flood_1086.jpg
+Flood_1087.jpg
+Flood_1088.jpg
+Flood_1089.jpg
+Flood_1090.jpg
+Flood_1091.jpg
+Flood_1092.jpg
+Flood_1095.jpg
+Flood_1096.jpg
+Flood_1097.jpg
+Flood_1098.jpg
+Flood_1099.jpg
+flood_1341.jpg
+flood_136.jpg
+flood_145.jpg
+flood_1485.jpg
+flood_15.jpg
+flood_1505.jpg
+flood_1506.jpg
+flood_151.jpg
+flood_1511.jpg
+flood_153.jpg
+flood_1531.jpg
+flood_1533.jpg
+flood_154.jpg
+flood_155.jpg
+flood_1599.jpg
+flood_16.jpg
+flood_1601.jpg
+flood_162.jpg
+flood_1622.jpg
+flood_163.jpg
+flood_1658.jpg
+flood_1659.jpg
+flood_1660.jpg
+flood_1661.jpg
+flood_1664.jpg
+flood_1668.jpg
+flood_1670.jpg
+flood_1671.jpg
+flood_168.jpg
+flood_169.jpg
+flood_1696.jpg
+flood_170.jpg
+flood_1707.jpg
+flood_1709.jpg
+flood_171.jpg
+flood_172.jpg
+flood_1746.jpg
+flood_1860.jpg
+flood_1869.jpg
+flood_1877.jpg
+flood_1886.jpg
+flood_1936.jpg
+flood_1947.jpg
+flood_1948.jpg
+flood_1949.jpg
+flood_1950.jpg
+flood_2.jpg
+flood_2006.jpg
+flood_21.jpg
+flood_2101.jpg
+flood_2106.jpg
+flood_2122.jpg
+flood_2149.jpg
+flood_2189.jpg
+flood_2199.jpg
+flood_2220.jpg
+flood_2223.jpg
+flood_2266.jpg
+flood_2291.jpg
+flood_2293.jpg
+flood_2295.jpg
+flood_2296.jpg
+flood_2299.jpg
+flood_23.jpg
+flood_2332.jpg
+flood_2380.jpg
+flood_2386.jpg
+flood_2469.jpg
+flood_2470.jpg
+flood_2471.jpg
+flood_2472.jpg
+flood_2473.jpg
+flood_2474.jpg
+flood_2475.jpg
+flood_2476.jpg
+flood_2477.jpg
+flood_2478.jpg
+flood_2479.jpg
+flood_2480.jpg
+flood_2481.jpg
+flood_2482.jpg
+flood_2483.jpg
+flood_2484.jpg
+flood_2485.jpg
+flood_2486.jpg
+flood_2487.jpg
+flood_2488.jpg
+flood_2489.jpg
+flood_2490.jpg
+flood_2491.jpg
+flood_2492.jpg
+flood_2493.jpg
+flood_2494.jpg
+flood_2495.jpg
+flood_2566.jpg
+flood_2587.jpg
+flood_26.jpg
+flood_2645.jpg
+flood_2740.jpg
+flood_2767.jpg
+flood_2768.jpg
+flood_277.jpg
+flood_2794.jpg
+flood_28.jpg
+flood_281.jpg
+flood_2830.jpg
+flood_2838.jpg
+flood_2846.jpg
+flood_2856.jpg
+flood_2857.jpg
+flood_286.jpg
+flood_298.jpg
+flood_2995.jpg
+flood_3.jpg
+flood_3030.jpg
+flood_3150.jpg
+flood_3195.jpg
+flood_3304.jpg
+flood_3305.jpg
+flood_3306.jpg
+flood_3307.jpg
+flood_3342.jpg
+flood_3395.jpg
+flood_3396.jpg
+flood_3397.jpg
+flood_3398.jpg
