@@ -134,6 +134,11 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
     backgroundColor: 'rgba(11, 18, 32, 0.28)',
+    // The top layer, stated rather than inherited. Being last in the tree is
+    // not enough on Android: without this the map rail (elevation 8) and the
+    // route sheet are painted over the top of the detour offer, which is the
+    // one thing on this screen that must never be obscured.
+    elevation: t.layer.offer, zIndex: t.layer.offer,
   },
   sheet: {
     backgroundColor: t.color.bgPanel,
