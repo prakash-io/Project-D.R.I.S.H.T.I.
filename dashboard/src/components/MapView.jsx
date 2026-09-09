@@ -86,7 +86,39 @@ export default function MapView({
     // Alpha, not width, separates a route from the corridor beneath it. The
     // 2D dot is 5 px and the corridor is 3 px; a fleet route heavier than
     // either would turn eleven active trips into a solid mat.
+    // THE ROAD A TRUCK IS NO LONGER ON.
+    //
+    // Pushed before the live routes so it draws UNDER them. Approving a hazard
+    // replaces a truck's path in place, and the previous behaviour was that the
+    // old line simply stopped being drawn -- so the single most important thing
+    // the platform does was rendered as one line quietly becoming a different
+    // line, with nothing on screen to compare against. A dispatcher who looked
+    // away for the two seconds it takes could not tell that anything had
+    // happened at all.
+    //
+    // Deliberately NOT the truck's own colour: this is not that truck's road
+    // any more, and reusing the hue would read as a second live vehicle. Muted
+    // red-grey at low alpha and hairline width -- present enough to trace the
+    // road the convoy WOULD have taken through the landslide, faint enough
+    // that it never competes with the route the driver is actually on.
     if (showFleetRoutes && fleetRoutes?.length > 0) {
+      const superseded = fleetRoutes.filter(
+        (r) => Array.isArray(r.previous_coordinates) && r.previous_coordinates.length > 1);
+      if (superseded.length > 0) {
+        built.push(new PathLayer({
+          id: 'fleet-routes-superseded',
+          data: superseded,
+          getPath: (r) => r.previous_coordinates,
+          getColor: [196, 92, 84, 150],
+          widthUnits: 'pixels',
+          getWidth: 2,
+          capRounded: true,
+          jointRounded: true,
+          pickable: false,
+          updateTriggers: { getPath: fleetRoutes },
+        }));
+      }
+
       built.push(new PathLayer({
         id: 'fleet-routes',
         data: fleetRoutes,

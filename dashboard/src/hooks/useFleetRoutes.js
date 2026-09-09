@@ -69,14 +69,23 @@ export function useFleetRoutes() {
         const coordinates = trip.geometry?.coordinates;
         if (!Array.isArray(coordinates) || coordinates.length < 2) continue;
         // Carried over so a refresh does not reset every truck's cursor.
-        const tracker = byTruck.current.get(trip.truck_id)?.tracker
-          ?? new RouteTracker(coordinates);
+        const prior = byTruck.current.get(trip.truck_id);
+        const tracker = prior?.tracker ?? new RouteTracker(coordinates);
         tracker.setCoordinates(coordinates);
         next.set(trip.truck_id, {
           truck_id: trip.truck_id,
           trip_id: trip.trip_id,
           plate: trip.plate,
           coordinates,
+          // The superseded road, carried across the refetch. Approving an
+          // incident calls approve() and then refresh(), so a ghost held only
+          // in the socket handler would be built and then destroyed inside the
+          // same click -- the dispatcher would see the old route vanish, which
+          // is the exact thing it exists to prevent. /trips/active cannot
+          // supply it (the trip row now holds the NEW path), so the only copy
+          // is the one the client already had.
+          previous_coordinates: prior?.previous_coordinates,
+          superseded_distance_m: prior?.superseded_distance_m,
           distance_m: trip.planned_distance_m,
           duration_sec: trip.planned_duration_sec,
           progress: trip.progress,
@@ -112,9 +121,24 @@ export function useFleetRoutes() {
   }, [upsert]);
 
   const onRouteUpdated = useCallback((payload) => {
+    // The road this detour REPLACES. Captured here because this is the last
+    // moment it exists anywhere on the client: upsert is about to overwrite
+    // it, the trip row in the database has already been updated, and
+    // /trips/active would return the new path. Keeping it is what turns "the
+    // line moved" into a visible before-and-after -- without it the original
+    // route simply disappears and a dispatcher watching the board has nothing
+    // to compare the detour against.
+    const outgoing = byTruck.current.get(payload?.truck_id);
     upsert({
       truck_id: payload?.truck_id,
       trip_id: payload?.trip_id,
+      previous_coordinates: outgoing?.coordinates ?? null,
+      // The WHOLE road being replaced, to match the geometry drawn beside it.
+      // Not `previous_distance_m`: that is the part still ahead of the truck,
+      // which is the baseline the driver's card compares against and would
+      // label this line short by however far the truck has already driven.
+      superseded_distance_m: outgoing?.distance_m
+        ?? payload?.previous_route_total_m ?? null,
       // route_geom is the current name; `geometry` is read as a fallback so a
       // backend that has not been redeployed still moves the line.
       coordinates: (payload?.route_geom ?? payload?.geometry)?.coordinates,
