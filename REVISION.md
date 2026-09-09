@@ -220,6 +220,42 @@ with coordinates advancing, dashboard reading `Telemetry link up / Units 1`, and
 the phone showing LIVE, `Shillong 95.2 km` and a 60 km/h speed bubble -- 95.2 km
 agreeing with the pristine 95,164 m baseline.
 
+### Two operational hazards found while demonstrating
+
+**The app streams only while the screen is on.** Telemetry froze at a single
+`captured_at` across repeated polls while `pidof com.drishti` still answered;
+`screencap` returned a 15 KB pure-black frame against 1.8 MB for a real one, and
+one `KEYCODE_WAKEUP` resumed the stream with positions advancing. Reproduced
+twice. Ordinary Android doze -- the client runs no foreground service and takes
+no wake lock. It presents as a dead backend, not a sleeping phone. Mitigation
+for a demo is to keep the screen awake; a foreground service is the real fix and
+is not written.
+
+Wireless adb dies with it: the connect port vanished (34425 open, then gone) and
+the pairing survived but was unusable until Wireless debugging was toggled back
+on and a new port read off the handset. So set the screen timeout *while the
+connection still exists*.
+
+**`drishti-postgis` crash-restarted twice**, with free disk between 2.6 and
+3.8 GiB:
+
+        FATAL:  canceling authentication due to timeout
+        LOG:  server process (PID 51522) exited with exit code 2
+        LOG:  terminating any other active server processes
+
+Not memory -- the container held 156 MiB of 7.7 GiB. It tracks low disk plus a
+gradle build running concurrently with queries. `demo_reset.sh` already warns
+below ~5 GiB; that warning should be a hard gate before demonstrating, not
+advice. Recovery took about ten minutes and fsynced the whole data directory,
+refusing every connection meanwhile. Data survived both times intact
+(486,784 edges / 412,914 nodes), and the second crash left 13 edges blocked
+under `verified` incidents, which `demo_reset.sh` cleared back to the 95,164 m
+baseline.
+
+Note for reclaiming space: `docker builder prune` reported a 3.085 GB cache and
+freed **0 B on the host** -- Docker Desktop's disk image does not shrink. The
+gradle output under the worktree is what actually returns space.
+
 ### Disk
 
 `demo_reset.sh --check` warned at **1 GiB free**, below the ~5 GiB where
