@@ -840,6 +840,15 @@ export default function App() {
           <ErrorBoundary label="Map">
           <MapCanvas
             fix={fix} route={route}
+            // Without this the offline corridor pack is never built: MapCanvas
+            // reads apiUrl to construct the style URL the pack downloader
+            // needs, and an undefined prop takes the "no apiUrl" branch and
+            // gives up silently. Online the map is unaffected -- the live
+            // style is inline -- so the omission is invisible until the
+            // handset loses the network, which is the one moment the cached
+            // tiles exist for. Found on the device, not in review: the only
+            // symptom is a console.warn.
+            apiUrl={API_URL}
             // The offered detour, drawn dashed BESIDE the current route. The
             // driver can see where it would take them before deciding, which
             // is the point of asking rather than telling.

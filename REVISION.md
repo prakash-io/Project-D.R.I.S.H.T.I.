@@ -180,6 +180,46 @@ and the verifier passes on both checks with no stale address.
 The verifier was already right and already load-bearing. It caught this before
 the phone did, which is the whole reason it counts raw bytes.
 
+### The offline corridor pack was never built (found on the handset)
+
+With the app finally talking to dispatch, the first launch logged:
+
+        W ReactNativeJS: [map] no apiUrl; skipping offline corridor pack
+
+`MapCanvas` destructures an `apiUrl` prop (`src/ui/MapCanvas.jsx:135`) and uses
+it to build the style URL the offline pack downloader needs, but `App.jsx`
+never passed it at the mount site. `apiUrl` was `undefined`, so every launch
+took the guard branch and gave up. `API_URL` was correct and in scope the whole
+time -- it is passed to the tracker, the socket, the planner and the reporter
+on the same screen; only `MapCanvas` was missed.
+
+Invisible online, by construction: the live style is an inline object, so the
+map a driver navigates by looks perfect. It fails only with the network down --
+the one moment cached tiles exist for, and the dark-zone demo. The sole symptom
+is a `console.warn`, which is why static verification never saw it and three
+handset sessions did not either.
+
+Fixed by passing `apiUrl={API_URL}`. Verified on V2504 after rebuild and
+reinstall: the warning is gone, neither failure branch (`offline pack failed`,
+`offline cache unavailable`) fires, and `netstat` shows two connections from the
+handset to `:4000` -- one ESTABLISHED socket plus a completed HTTP fetch that
+did not exist before. The phone's own throughput readout went from 0.90 KB/s to
+27.8 KB/s at the same moment.
+
+### Connecting the handset at the venue
+
+Wireless debugging pairs and connects on **different ports**, and venue wifi
+blocked mDNS so `adb mdns services` stayed empty. `adb pair` on the pairing port
+succeeded; the connect port was found by scanning the handset (`10191, 34425,
+41919, 64660`) and `adb connect` took on **34425**. Worth remembering: the
+connect port changes whenever wireless debugging is toggled or the phone
+reboots.
+
+Verified end to end on the real device: `OD02-HANDSET` streaming at 16.67 m/s
+with coordinates advancing, dashboard reading `Telemetry link up / Units 1`, and
+the phone showing LIVE, `Shillong 95.2 km` and a 60 km/h speed bubble -- 95.2 km
+agreeing with the pristine 95,164 m baseline.
+
 ### Disk
 
 `demo_reset.sh --check` warned at **1 GiB free**, below the ~5 GiB where
@@ -206,11 +246,14 @@ carries `172.168.169.12`, verified in both places. This is the standing risk
 for a venue demo: **the address is compiled in, so a DHCP change is an app
 outage**, recovered by one 45 s `scripts/build_apk.sh`.
 
-### Not verified
+### Verified on the handset
 
-The handset was never reachable — `adb devices` and `adb mdns services` both
-empty for the whole session. Nothing in this entry was observed on a phone:
-the APK is verified by byte-counting its contents, not by running it.
+All of the above was subsequently confirmed on the physical device (V2504,
+wireless adb) at the venue: install, launch, live telemetry into the dashboard,
+and the offline-pack fix. What is **not** exercised here remains what has never
+been exercised — the TFLite speed model has still never run, and no dark-zone
+blackout was performed in this session, so map-matched dead reckoning on the
+handset is still unobserved.
 
 ---
 
