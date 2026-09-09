@@ -224,7 +224,7 @@ chip and telemetry all exercised. `unit="°"` renders a real degree glyph.
 
 ### Suite, from the merged tree
 
-15/15 green: ai-services 62 passed / 1 skipped, native 54 checks,
+17/17 green: ai-services 62 passed / 1 skipped, native 54 checks,
 travel_time 8, routeHeading 10, imu 2, verify_parse 56 files,
 verify_hardening, verify_runtime, verify_places_seed, map_style_verify 8,
 **route_alternatives_verify (previously never run) ALL CHECKS PASSED**,
