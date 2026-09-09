@@ -4,7 +4,10 @@
 # would silently hide real source directories.
 
 # Dependencies
-node_modules/
+# No trailing slash: `node_modules/` matches a DIRECTORY only, which is how a
+# symlink of that name was committed once (pointing at its own absolute path,
+# so every checkout got an ELOOP where the install should be).
+node_modules
 .pnp/
 .pnp.js
 
@@ -123,3 +126,4 @@ dashboard/dash_*.png
 # Playwright MCP's browser profile and trace output. Per-machine tooling state,
 # and ~100 MB of it.
 .playwright-mcp/
+!ai-services/models/*.pt

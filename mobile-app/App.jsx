@@ -12,19 +12,22 @@ import RNFS from 'react-native-fs';
 
 import MapCanvas from './src/ui/MapCanvas';
 import ErrorBoundary from './src/ui/ErrorBoundary';
-import MapControls from './src/ui/MapControls';
-import SpeedCard from './src/ui/SpeedCard';
+import MapRail from './src/ui/MapRail';
+import CorridorPicker from './src/ui/CorridorPicker';
+import NavCard from './src/ui/NavCard';
+import SpeedBubble from './src/ui/SpeedBubble';
+import LinkChip from './src/ui/LinkChip';
+import RouteSheet from './src/ui/RouteSheet';
 import HudScreen from './src/ui/HudScreen';
 import HazardScreen from './src/ui/HazardScreen';
 import DiagnosticsScreen from './src/ui/DiagnosticsScreen';
 import IncidentModal from './src/ui/IncidentModal';
 import RerouteAlert from './src/ui/RerouteAlert';
 import RerouteSheet from './src/ui/RerouteSheet';
-import RouteSummary from './src/ui/RouteSummary';
 import RoutePlanner, { HERE } from './src/ui/RoutePlanner';
 import SourceToggle from './src/ui/SourceToggle';
 import TabBar from './src/ui/TabBar';
-import Button from './src/ui/Button';
+import { Card, Stat } from './src/ui/Card';
 import { t } from './src/ui/tokens';
 
 import { createDatabase } from './src/db';
@@ -37,16 +40,32 @@ import { queueHazard, drainHazards, pendingHazardCount } from './src/services/ha
 import { ensureEdgeAssets } from './src/services/edgeAssets';
 import { refreshRouteHazards, cachedHazards, toFeatureCollection } from './src/services/hazards';
 import { speakAlert } from './src/services/voiceAlert';
-import { getCorridor, ensureTrip } from './src/services/corridors';
+import { listCorridors, getCorridor, ensureTrip } from './src/services/corridors';
 import { listPlaces, planTrip, ackReroute, routeCoordinates }
   from './src/services/routePlanner';
+// Compile-time injection from .env, the same mechanism src/services/bhashini.js
+// already uses. This file previously read process.env.* directly, which React
+// Native's preset does NOT substitute -- so every value below silently fell
+// through to its hardcoded literal and the shipped bundle pointed at whatever
+// LAN address the machine happened to have on build day. That is a build-time
+// constant either way; routing it through @env is what makes it CHANGEABLE
+// without editing source.
+import {
+  API_URL as ENV_API_URL,
+  TRUCK_ID as ENV_TRUCK_ID,
+  ALERT_LANG as ENV_ALERT_LANG,
+  SIM_DRIVE as ENV_SIM_DRIVE,
+  SIM_CORRIDOR as ENV_SIM_CORRIDOR,
+  SIM_SPEED_KMH as ENV_SIM_SPEED_KMH,
+} from '@env';
 
-// NOTE: process.env.* is NOT substituted by React Native's Babel preset --
-// only NODE_ENV is. Every one of these falls through to its literal default in
-// a release bundle, so the default is the value that actually ships.
-const API_URL = process.env.API_URL ?? 'http://172.18.9.197:4000';
-const TRUCK_ID = process.env.TRUCK_ID ?? '651692e8-374b-401f-9b9f-e3ed86342ab5';
-const ALERT_LANG = process.env.ALERT_LANG ?? 'as';
+// Resolved at BUILD time from mobile-app/.env (react-native-dotenv). The
+// literals below are the last-resort defaults if a key is missing from .env;
+// allowUndefined is on, so a missing key is `undefined` rather than a build
+// error. Change .env and rebuild -- see scripts/build_apk.sh.
+const API_URL = ENV_API_URL ?? 'http://172.60.2.75:4000';
+const TRUCK_ID = ENV_TRUCK_ID ?? '651692e8-374b-401f-9b9f-e3ed86342ab5';
+const ALERT_LANG = ENV_ALERT_LANG ?? 'as';
 
 // ---------------------------------------------------------------- prototype
 // Demonstration mode. The handset is not in the North East, so real GNSS puts
@@ -61,9 +80,9 @@ const ALERT_LANG = process.env.ALERT_LANG ?? 'as';
 // and this handset's GNSS from the map screen (SourceToggle). Remember that
 // process.env is not substituted in a release bundle, so THIS DEFAULT IS WHAT
 // SHIPS as the initial state.
-const SIM_DRIVE = (process.env.SIM_DRIVE ?? 'true') !== 'false';
-const SIM_CORRIDOR = process.env.SIM_CORRIDOR ?? 'ghy-shl';
-const SIM_SPEED_KMH = Number(process.env.SIM_SPEED_KMH ?? 60);
+const SIM_DRIVE = (ENV_SIM_DRIVE ?? 'true') !== 'false';
+const SIM_CORRIDOR = ENV_SIM_CORRIDOR ?? 'ghy-shl';
+const SIM_SPEED_KMH = Number(ENV_SIM_SPEED_KMH ?? 60);
 
 const MAX_LOGS = 40;
 
@@ -98,6 +117,7 @@ export default function App() {
   const [places, setPlaces] = useState([]);
   const [origin, setOrigin] = useState(null);
   const [destination, setDestination] = useState(null);
+  const [plannerOpen, setPlannerOpen] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [planError, setPlanError] = useState(null);
   /// A reroute the backend has OFFERED and the driver has not answered.
@@ -105,21 +125,19 @@ export default function App() {
   /// map keeps the road the driver chose until they tap Accept.
   const [proposal, setProposal] = useState(null);
   const [answering, setAnswering] = useState(false);
-  // The demonstration corridor is a launch constant again, not a rail of
-  // tiles the driver picks from. The Source/Destination card at the top of the
-  // map does that job now over the whole road graph -- every corridor the rail
-  // could offer is a pair of places in that list, and the planner reaches the
-  // ones it never held as well. `activeCorridor` survives because SourceToggle
-  // names what the demo segment is driving.
+  const [corridors, setCorridors] = useState([]);
+  const [corridorId, setCorridorId] = useState(SIM_CORRIDOR);
   const activeCorridor = useRef(null);
+  const [corridorBusy, setCorridorBusy] = useState(null);
   // Measured, not assumed. The map control rail used to sit at a fixed 36%
-  // from the top, and every time the bottom stack grew the RECENTER button
-  // ended up behind a card -- recenter being the one control a driver needs
-  // precisely when the camera is not on the truck. Anchoring to the real
-  // height of the bottom stack means the rail stays clear whatever that stack
-  // holds, which is what let the stack be rebuilt for this layout without
-  // re-tuning a percentage.
-  const [bottomH, setBottomH] = useState(0);
+  // from the top, which cleared the stat cards but not the corridor picker
+  // added above them -- the RECENTER button ended up behind the card, and
+  // recenter is the one control a driver needs when the camera is not on the
+  // truck. Anchoring to the real height of the bottom stack means the rail
+  // stays clear whatever that stack grows to hold.
+  // The route sheet: null, or which section the driver asked for. Everything
+  // that used to be stacked permanently over the map lives in here.
+  const [sheet, setSheet] = useState(null);
   const [picking, setPicking] = useState(false);
   const [linkUp, setLinkUp] = useState(false);
   const [fixAge, setFixAge] = useState(0);
@@ -395,10 +413,18 @@ export default function App() {
           'No destinations available yet — the list will load when dispatch is reachable.');
       }
 
+      // The corridor LIST is metadata only, ~3 KB, so it is fetched whatever
+      // the source: the picker has to be populated the moment the driver
+      // switches to the demonstration drive. The GEOMETRY is not -- one
+      // corridor runs to thousands of coordinates, and there is no reason to
+      // pull it on a session that never leaves real GNSS.
+      const list = await listCorridors(API_URL);
+      if (!disposed) setCorridors(list);
+
       let simulate = null;
       if (SIM_DRIVE) {
         try {
-          const corridor = await getCorridor(API_URL, SIM_CORRIDOR);
+          const corridor = await getCorridor(API_URL, corridorId);
           activeCorridor.current = corridor;
           const coordinates = corridor?.geometry?.coordinates ?? [];
           if (coordinates.length >= 2) {
@@ -560,6 +586,7 @@ export default function App() {
       // abandoned. Leaving it up would let them accept a detour around a
       // hazard that is no longer on their way.
       setProposal(null);
+      setPlannerOpen(false);
       log('INFO', 'ROUTE_PLANNED',
         `${from.name} → ${to.name}: ${(planned.distanceM / 1000).toFixed(1)} km`
         + (Number.isFinite(planned.durationSec)
@@ -587,7 +614,7 @@ export default function App() {
       return;
     }
     if (tracker.current.setSimulated(next) === false) {
-      setAlert('Set a source and destination first — there is nothing to drive.');
+      setAlert('Plan a route or pick a corridor first — there is nothing to drive.');
       return;
     }
     setIsSimulated(next);
@@ -653,6 +680,50 @@ export default function App() {
   /// Ask the model for hazards along a route and cache them. Never throws:
   /// a failed refresh leaves the previous warnings in place, because "no
   /// hazards" and "could not ask" must not look the same.
+  /**
+   * Change the demonstration corridor without restarting the app.
+   *
+   * The route the map draws and the route the truck drives are set from the
+   * SAME geometry here, so they cannot disagree -- a picker that redrew the
+   * line without moving the truck would be a worse lie than no picker.
+   */
+  const switchCorridor = async (id) => {
+    if (!id || id === corridorId || corridorBusy) return;
+    setCorridorBusy(id);
+    try {
+      const corridor = await getCorridor(API_URL, id);
+      const coordinates = corridor?.geometry?.coordinates ?? [];
+      if (coordinates.length < 2) throw new Error('corridor has no geometry');
+
+      activeCorridor.current = corridor;
+      setCorridorId(id);
+      // A corridor is costed by the server, but /routes/corridors carries only
+      // its distance -- there is no stored ETA for it -- so the summary card
+      // is given the distance and left honest about the missing duration
+      // rather than shown a number this client invented.
+      applyRoute(coordinates, { distanceM: corridor.distance_m, rerouted: false });
+      setOrigin(asPlace(places, corridor.origin_name,
+        corridor.origin_lat, corridor.origin_lng));
+      setDestination(asPlace(places, corridor.destination_name,
+        corridor.destination_lat, corridor.destination_lng));
+      // A corridor change replaces the road; an offer against the road it
+      // replaced is no longer a question the driver can answer.
+      setProposal(null);
+
+      try {
+        await ensureTrip(API_URL, TRUCK_ID, corridor);
+      } catch (error) {
+        log('WARN', 'TRIP_FAIL', `No active trip: ${error.message}`);
+      }
+      log('INFO', 'CORRIDOR', `Now driving ${corridor.name} — `
+        + `${(corridor.distance_m / 1000).toFixed(1)} km.`);
+    } catch (error) {
+      log('ERR', 'CORRIDOR_FAIL', `Could not load corridor: ${error.message}`);
+    } finally {
+      setCorridorBusy(null);
+    }
+  };
+
   const refreshHazards = async (coordinates) => {
     if (!database.current) return;
     const result = await refreshRouteHazards(database.current, {
@@ -728,22 +799,33 @@ export default function App() {
     }
   };
 
+  const heading = fix?.heading ?? fix?.heading_deg ?? fix?.headingDeg;
+  const altitude = fix?.altitude ?? fix?.altitude_m;
+
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
 
-      <View style={styles.header}>
-        <Icon name="podcasts" size={22}
-              color={linkUp ? t.color.accent : t.color.textMuted}
-              importantForAccessibility="no" />
-        <Text style={styles.wordmark} accessibilityRole="header">D.R.I.S.H.T.I.</Text>
-        <Icon
-          name={linkUp ? 'signal-cellular-alt' : 'signal-cellular-connected-no-internet-4-bar'}
-          size={22}
-          color={linkUp ? t.color.accent : t.color.alertText}
-          accessibilityLabel={linkUp ? 'Dispatch link up' : 'Dispatch link down'}
-        />
-      </View>
+      {/* The map is the only screen that earns a full-bleed surface, so it is
+          the only one that loses the opaque header: an 80pt white band across
+          the top of a navigation display buys a wordmark at the price of the
+          road ahead. The brand and the link status are still there on the map,
+          floating over it, in about a fifth of the height. The other three
+          tabs are ordinary scrolling screens and keep the bar. */}
+      {tab !== 'map' ? (
+        <View style={styles.header}>
+          <Icon name="podcasts" size={22}
+                color={linkUp ? t.color.accent : t.color.textMuted}
+                importantForAccessibility="no" />
+          <Text style={styles.wordmark} accessibilityRole="header">D.R.I.S.H.T.I.</Text>
+          <Icon
+            name={linkUp ? 'signal-cellular-alt' : 'signal-cellular-connected-no-internet-4-bar'}
+            size={22}
+            color={linkUp ? t.color.accent : t.color.alertText}
+            accessibilityLabel={linkUp ? 'Dispatch link up' : 'Dispatch link down'}
+          />
+        </View>
+      ) : null}
 
       <View style={styles.body}>
         {/* The map is a native MapLibre surface, and this app has never been
@@ -758,10 +840,6 @@ export default function App() {
           <ErrorBoundary label="Map">
           <MapCanvas
             fix={fix} route={route}
-            // Needed for the offline corridor pack: MapLibre will only take an
-            // http(s) style URL there, so the pack fetches the style from the
-            // backend rather than from app storage.
-            apiUrl={API_URL}
             // The offered detour, drawn dashed BESIDE the current route. The
             // driver can see where it would take them before deciding, which
             // is the point of asking rather than telling.
@@ -769,87 +847,59 @@ export default function App() {
             hazards={hazards}
             forecast={toFeatureCollection(forecast)}
             zoom={zoom} follow={follow} followKey={followKey}
-            // Labels for the two route-end markers. The POSITIONS come from
-            // the geometry itself inside MapCanvas -- these are only the
-            // names, because a coordinate does not carry one.
-            originName={origin?.name}
-            destinationName={destination?.name}
             // A drag, pinch or rotate hands the viewport to the driver. The
-            // recentre button below is the only way back, which is the
+            // follow button on the rail is the only way back, which is the
             // Google Maps contract and the one drivers already expect.
             onUserPan={stopFollowing}
           >
-            {/* Source and destination, at the top of the screen. This is
-                the Google Maps position and it is here for the Google Maps
-                reason: it is the first control a parked driver reaches for and
-                the one a moving driver ignores. It replaces the collapsed
-                "Where to?" pill that used to sit at the bottom of the stack
-                below. box-none so the map still takes a drag everywhere the
-                card itself is not. */}
+            {/* LEVEL 1 -- always on the glass, and only these. Brand and link
+                status on one line, then the single card that answers "where am
+                I going and how far is left". Four cards used to say that. */}
             <View style={styles.mapTop} pointerEvents="box-none">
-              <RoutePlanner
-                places={places}
-                origin={origin}
+              <View style={styles.brandRow} pointerEvents="box-none">
+                <View style={styles.brand}>
+                  <Icon name="podcasts" size={15} color={t.color.accent}
+                        importantForAccessibility="no" />
+                  <Text style={styles.brandMark} accessibilityRole="header">
+                    D.R.I.S.H.T.I.
+                  </Text>
+                </View>
+                <LinkChip mode={mode} linkUp={linkUp} queued={queued} />
+              </View>
+
+              <NavCard
                 destination={destination}
-                hasFix={Boolean(fix)}
-                planning={planning}
-                error={planError}
-                onChange={(field, place) => {
-                  if (field === 'origin') setOrigin(place); else setDestination(place);
-                }}
-                onSwap={() => { setOrigin(destination); setDestination(origin); }}
-                onPlan={planRoute}
-                onClearError={() => setPlanError(null)}
-              />
-            </View>
-
-            <MapControls
-              style={[styles.mapControls, { bottom: bottomH + t.space.md }]}
-              onZoomIn={() => setZoom((z) => Math.min(18, z + 1))}
-              onZoomOut={() => setZoom((z) => Math.max(3, z - 1))}
-              onRecenter={() => { setFollow(true); setFollowKey((k) => k + 1); }}
-              follow={follow}
-              onToggleFollow={() => setFollow((f) => !f)}
-            />
-
-            <View
-              style={styles.mapBottom}
-              pointerEvents="box-none"
-              onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}
-            >
-              {/* Speed, bottom-left, which is where every navigator puts it
-                  and therefore where the driver's eye already goes. Compact:
-                  the mode pill under it appears only when the mode is worth
-                  interrupting for -- see SpeedCard. */}
-              <SpeedCard fix={fix} mode={mode} ageMs={fixAge} compact
-                         style={styles.speed} />
-
-              {/* Distance and ETA for the active route -- the navigation band.
-                  Inside mapBottom so MapControls keeps clearing the stack. */}
-              <RouteSummary
                 distanceM={routeEta?.distanceM}
                 durationSec={routeEta?.durationSec}
                 rerouted={routeEta?.rerouted}
-                style={styles.routeSummary}
-              />
-
-              <SourceToggle
-                simulated={isSimulated}
-                onChange={changeSource}
-                disabled={!route}
-                routeName={origin && destination
-                  ? `${origin.name} → ${destination.name}`
-                  : (activeCorridor.current?.name ?? null)}
-              />
-
-              <Button
-                label="Report Hazard"
-                icon="warning"
-                onPress={reportHazard}
-                disabled={picking}
-                accessibilityHint="Photographs a road hazard and queues it for dispatch"
+                onPress={() => setSheet('plan')}
+                style={styles.navCard}
               />
             </View>
+
+            <MapRail
+              style={styles.mapRail}
+              onZoomIn={() => setZoom((z) => Math.min(18, z + 1))}
+              onZoomOut={() => setZoom((z) => Math.max(3, z - 1))}
+              follow={follow}
+              // Recentre and follow were two buttons holding two pieces of
+              // state; to the driver they are one intent. Released, it flies
+              // the camera back and re-arms following -- which is exactly what
+              // the old recentre button did. Lit, it hands the viewport back.
+              onFollow={() => {
+                if (follow) { setFollow(false); return; }
+                setFollow(true);
+                setFollowKey((k) => k + 1);
+              }}
+              onSearch={() => { setPlannerOpen(true); setSheet('plan'); }}
+              onRoutes={() => { setPlannerOpen(false); setSheet('routes'); }}
+              onReport={reportHazard}
+              reporting={picking}
+            />
+
+            {/* LEVEL 2 -- small, floating, bottom-left, clear of the rail. */}
+            <SpeedBubble fix={fix} mode={mode} ageMs={fixAge}
+                         style={styles.speedBubble} />
           </MapCanvas>
           </ErrorBoundary>
         ) : null}
@@ -885,6 +935,61 @@ export default function App() {
           badges={{ hazard: hazardQueued || undefined, sync: queued || undefined }}
         />
       </View>
+
+      {/* LEVEL 3 -- the planner, the position source, the ten corridors and
+          the instruments. All of it still here, all of it one tap down. Kept
+          below RerouteAlert and RerouteSheet in the tree so a hazard offer is
+          never hidden behind a panel the driver opened to browse corridors. */}
+      <RouteSheet open={sheet !== null} onClose={() => setSheet(null)}>
+        <RoutePlanner
+          places={places}
+          origin={origin}
+          destination={destination}
+          hasFix={Boolean(fix)}
+          open={plannerOpen}
+          onOpenChange={setPlannerOpen}
+          planning={planning}
+          error={planError}
+          onChange={(field, place) => {
+            if (field === 'origin') setOrigin(place); else setDestination(place);
+          }}
+          onSwap={() => { setOrigin(destination); setDestination(origin); }}
+          onPlan={planRoute}
+          onClearError={() => setPlanError(null)}
+        />
+
+        <SourceToggle
+          simulated={isSimulated}
+          onChange={changeSource}
+          disabled={!route}
+          routeName={origin && destination
+            ? `${origin.name} → ${destination.name}`
+            : (activeCorridor.current?.name ?? null)}
+        />
+
+        {isSimulated ? (
+          <CorridorPicker
+            corridors={corridors}
+            activeId={corridorId}
+            busy={corridorBusy}
+            onSelect={switchCorridor}
+          />
+        ) : null}
+
+        {/* Bearing and altitude read from the same fix as the speed bubble.
+            They are instruments, not driving controls -- looked at when
+            someone asks, which is what this sheet is for. */}
+        <View style={styles.statRow}>
+          <Card style={styles.statCard}>
+            <Stat label="BEARING" unit="°"
+                  value={Number.isFinite(heading) ? pad3(heading) : '—'} />
+          </Card>
+          <Card style={[styles.statCard, styles.statCardRight]}>
+            <Stat label="ALTITUDE" unit="m"
+                  value={Number.isFinite(altitude) ? Math.round(altitude) : '—'} />
+          </Card>
+        </View>
+      </RouteSheet>
 
       <RerouteAlert alert={alert} onDismiss={() => setAlert(null)} />
 
@@ -931,15 +1036,12 @@ function hazardSentence(payload) {
   const noun = kind === 'landslide' ? 'Landslide'
     : kind === 'flood' ? 'Flooding'
       : 'Road obstruction';
-  // A driver's OWN report, before any dispatcher has seen it, is not a warning
-  // about the road ahead -- it is a receipt for the photograph they just sent.
-  // Reading it out as "Warning: landslide reported ahead" was the audible half
-  // of the same defect the modal had: the app telling the person standing at
-  // the landslide about the landslide, in an alert voice, on their own upload.
-  if (payload?.scope === 'awaiting_approval' || payload?.requires_approval === true) {
-    return `${noun} report sent to dispatch. You will be told if a detour is approved.`;
-  }
   return `Warning: ${noun} reported ahead. Slow down and proceed with caution.`;
+}
+
+/// 007°, not 7° — a bearing is always three digits on an instrument.
+function pad3(n) {
+  return String(Math.round(n)).padStart(3, '0');
 }
 
 const styles = StyleSheet.create({
@@ -958,14 +1060,37 @@ const styles = StyleSheet.create({
     color: t.color.accent, letterSpacing: 1.2,
   },
   body: { flex: 1 },
+
+  // The map runs full-bleed to the top of the screen, so the floating stack
+  // clears the status bar itself rather than being pushed down by a header.
   mapTop: {
-    position: 'absolute', top: t.space.md, left: t.space.lg, right: t.space.lg,
+    position: 'absolute', left: t.space.md, right: t.space.md,
+    top: (Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 0) + t.space.sm,
   },
-  mapControls: { position: 'absolute', right: t.space.lg },
-  speed: { marginBottom: t.space.md },
-  routeSummary: { marginHorizontal: 0 },
-  mapBottom: {
-    position: 'absolute', left: t.space.lg, right: t.space.lg, bottom: t.space.md,
+  brandRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: t.space.sm,
   },
-  tabWrap: { paddingBottom: t.space.md, paddingTop: t.space.sm },
+  brand: { flexDirection: 'row', alignItems: 'center' },
+  brandMark: {
+    fontFamily: t.font.sansMedium, fontSize: t.type.meta, fontWeight: '800',
+    color: t.color.accent, letterSpacing: 1.1, marginLeft: 6,
+    // The wordmark now sits on the map rather than on a white bar, and the
+    // map behind it can be anything. A dark halo keeps it legible over a
+    // river, a snowfield or a night raster without a card behind it.
+    textShadowColor: 'rgba(0,0,0,0.55)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  navCard: {},
+
+  // Bottom-anchored so the stack grows upward and the report button stays
+  // under the thumb on any screen height.
+  mapRail: { position: 'absolute', right: t.space.md, bottom: t.space.md },
+  speedBubble: { position: 'absolute', left: t.space.md, bottom: t.space.md },
+
+  statRow: { flexDirection: 'row', marginBottom: t.space.md },
+  statCard: { flex: 1, paddingVertical: t.space.md },
+  statCardRight: { marginLeft: t.space.md },
+  tabWrap: { paddingBottom: t.space.md, paddingTop: t.space.xs },
 });

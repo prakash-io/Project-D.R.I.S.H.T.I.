@@ -8,11 +8,23 @@
   Production dispatch MUST be HTTPS. Rather than re-enable cleartext for the
   whole app, this permits it for the bring-up server on the lab LAN alone;
   every other destination still requires TLS.
+
+  THE ADDRESS BELOW IS REWRITTEN BY scripts/build_apk.sh.
+  It must always match API_URL in mobile-app/.env. They are two different files
+  holding the same fact, and when they disagree the app fails in the most
+  misleading way available: the phone's BROWSER reaches /health perfectly (Chrome
+  does not consult this file), while the app itself cannot open a single socket,
+  so every symptom points at React Native and none of them point here.
+  A network-security-config takes domains, not CIDR ranges, so there is no way
+  to write "any host on the LAN" — it has to be the literal address.
 -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">
         <!-- Hardware bring-up host. Remove once dispatch is served over TLS. -->
-        <domain includeSubdomains="false">172.18.9.197</domain>
+        <domain includeSubdomains="false">172.60.0.161</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <!-- The Android emulator's alias for the host machine, so an emulator
+             build needs no further edit. -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

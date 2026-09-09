@@ -42,6 +42,16 @@ const p = {
   amber600: '#B26A00',  //  4.6:1 on white
   amberWash: '#FDF0E1',
 
+  // Floating glass surfaces over the live map. The home screen is
+  // navigation-first: dark translucent chips read at a glance against the
+  // Bhuvan raster in daylight, where a white card washes out, and they cost
+  // far less of the map than an opaque card of the same information.
+  glass: 'rgba(16,19,24,0.88)',
+  glassSoft: 'rgba(16,19,24,0.74)',
+  glassEdge: 'rgba(255,255,255,0.12)',
+  onGlass: '#FFFFFF',
+  onGlassMuted: 'rgba(255,255,255,0.64)',
+
   // Data provenance — carried over unchanged. A driver and a dispatcher
   // looking at the same truck must see the same two colours.
   gnss: '#1A73E8',      // GNSS fix   4.6:1 on white
@@ -122,6 +132,13 @@ export const t = {
     routeStart: p.navGreen,
     routeEnd: p.navRed,
 
+    // Floating map surfaces.
+    glass: p.glass,
+    glassSoft: p.glassSoft,
+    glassEdge: p.glassEdge,
+    onGlass: p.onGlass,
+    onGlassMuted: p.onGlassMuted,
+
     // The two that carry the product's whole meaning.
     sourceGnss: p.gnss,
     sourceDeadReckoning: p.deadrec,
@@ -138,6 +155,14 @@ export const t = {
   // Rounded system: pills for controls, generous radii for floating cards.
   radius: { pill: 999, card: 24, inner: 16, chip: 12 },
   hairline: 1,
+
+  // Stacking. On Android `elevation` decides paint order, NOT position in the
+  // tree -- so an overlay that comes later in JSX is still drawn UNDER a
+  // floating map button with a higher elevation. The map rail casts at 8, so
+  // every full-screen overlay states a layer here rather than inheriting one
+  // from whichever shadow token it happened to use. zIndex is set alongside
+  // for iOS, where elevation means nothing.
+  layer: { mapOverlay: 8, sheet: 20, alert: 28, offer: 32 },
   // >=44pt per Apple HIG / 48dp Android. Applied to every Pressable.
   touchMin: 48,
 
@@ -149,6 +174,15 @@ export const t = {
       shadowRadius: 18,
       shadowOffset: { width: 0, height: 6 },
       elevation: 6,
+    },
+    // Floating glass: a wider, softer cast so a dark chip still separates
+    // from a dark stretch of map without a visible edge.
+    float: {
+      shadowColor: '#000000',
+      shadowOpacity: 0.30,
+      shadowRadius: 14,
+      shadowOffset: { width: 0, height: 5 },
+      elevation: 8,
     },
     control: {
       shadowColor: '#0B1220',

@@ -41,7 +41,7 @@ export default function TabBar({ active, onChange, badges = {} }) {
               <Icon
                 name={tab.icon}
                 size={22}
-                color={selected ? t.color.onAccent : t.color.textMuted}
+                color={selected ? t.color.accentText : t.color.textMuted}
                 importantForAccessibility="no"
               />
               {badge ? <View style={styles.badge} /> : null}
@@ -61,7 +61,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: t.color.bgPanel,
     borderRadius: t.radius.pill,
-    padding: 6,
+    borderWidth: t.hairline, borderColor: t.color.border,
+    padding: 5,
     marginHorizontal: t.space.lg,
   },
   item: {
@@ -72,13 +73,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 6,
   },
-  itemActive: { backgroundColor: t.color.accent },
+  // Tinted rather than filled. A solid orange block was the heaviest element
+  // on the screen for a control the driver looks at once a minute; the wash
+  // plus orange ink says "selected" just as plainly at arm's length, and
+  // accentText is the AA-safe orange (4.7:1) so the label still passes on it.
+  itemActive: { backgroundColor: t.color.accentWash },
   itemPressed: { backgroundColor: t.color.bgInset },
   label: {
     fontFamily: t.font.sansMedium, fontSize: t.type.micro, fontWeight: '700',
     letterSpacing: 0.8, color: t.color.textMuted, marginTop: 2,
   },
-  labelActive: { color: t.color.onAccent },
+  labelActive: { color: t.color.accentText },
   badge: {
     position: 'absolute', top: -2, right: -4,
     width: 9, height: 9, borderRadius: 5,
