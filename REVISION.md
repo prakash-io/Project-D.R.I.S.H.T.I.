@@ -27,7 +27,7 @@ reverse-engineer. Newest revision first.
 | 2 | ML-02 load scaler / indices / rasters | ✅ + built the road index that never shipped |
 | 2 | ML-03 Open-Meteo peak intensity | ✅ live |
 | 2 | ML-04 XGBoost hazard model | ✅ retrained on raster-rebuilt features, 0.9942 test acc, physically coherent — see R9 |
-| 2 | ML-05 YOLOv8 incident verifier | ⚠️ retrained 2-class, 1.000 top-1 — but trained on satellite/aerial, served ground-level photos, see R8 |
+| 2 | ML-05 YOLOv8 incident verifier | ⚠️ 3-class, **119/120 = 99.2% measured on held-out through the live API (R13)** — pipeline correct; both HAZARD classes are still satellite/aerial while drivers send ground-level photos, so Open Q8 stands |
 | 2 | ML-06 `/predict-hazard`, `/verify-incident` | ✅ both verified end-to-end, 57 tests |
 | 3 | WEB-01 React + Tailwind dark shell | ✅ Vite, verified in headless Chrome |
 | 3 | WEB-02 Deck.gl over MapLibre/OSM | ✅ CARTO dark basemap, no API key |
@@ -132,6 +132,110 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
         ▼
   C++ EKF            ⚠ MAE 4.0 m/s ≈ 240 m drift per minute — open question 2
 ```
+
+---
+
+## R13 — 2026-09-09 · Final audit: the stranded redesign, and a detour sold as a saving
+
+**Modified**: `backend/src/routes/incidents.js`, `backend/test/reroute_proposal_verify.mjs`,
+`dashboard/src/hooks/useFleetRoutes.js`, `dashboard/src/components/MapView.jsx`,
+`mobile-app/App.jsx`, `mobile-app/src/ui/tokens.js`,
+`mobile-app/android/app/src/main/res/xml/network_security_config.xml`, `.gitignore`.
+**Restored**: `mobile-app/src/ui/CorridorPicker.jsx`.
+**Tracked for the first time**: `scripts/build_apk.sh`, `scripts/demo_reset.sh`.
+**Untracked**: `mobile-app/node_modules`.
+
+### The reroute card sold a hazard detour as a saving
+
+A reroute is planned from where the truck **is**; the figure it was compared
+against was the trip's **whole** planned distance. Every metre already driven
+was therefore credited to the diversion. Measured on the handset: 4,353 m along
+the Guwahati corridor, a genuine **+1,104 m** detour was offered to the driver
+as **"−3.2 km · 9 min shorter"**.
+
+`previousCosting` still measures the whole route — it is stored beside
+`previous_route` and is what declining restores, so it has to keep measuring
+what that geometry measures. New `remainingCosting` takes only the road still
+ahead (`ST_LineLocatePoint` → `ST_LineSubstring`), and the offer is costed
+against that. Duration is the trip's own costing scaled by the fraction
+remaining: an allocation of a figure the model produced, not a guess at a speed
+it never did. `previous_route_total_m` carries the full length on for the
+dispatcher board, which labels a superseded line and needs the road, not the tail.
+
+Every other case in `reroute_proposal_verify` leaves the truck at the trip
+origin, where the two baselines are the same number — which is exactly how this
+survived the suite. Section 7b now moves it a fifth of the way along first, and
+fails without the fix (95,267 m quoted against 77,096 m of road actually ahead).
+
+### The redesign was stranded on a branch, and had regressed a safety fix
+
+`6e0d5dc` (the map-first home) was cut from `d2d124c` and never merged, so it
+sat ten commits behind `main` while `main` carried mobile work it had never
+seen. Reporting a hazard from the phone raised a full-screen **ROAD OBSTRUCTION
+AHEAD / "Reported by dispatch on your route"** about the driver's *own*
+photograph, before any dispatcher had seen it and with nothing blocked. The
+backend was correct throughout (`pending_dispatcher_approval`, 0 edges blocked,
+emitted to `truck:<reporter>`); the build simply predated the guard that reads
+that scope.
+
+Merged, resolving to the redesign's layout with `main`'s semantics re-applied
+by hand: the unapproved-report guard, the `HAZARD_SENT`/`HAZARD_RX` wording, the
+camera permission ask, and the cancel-vs-`errorCode` split. `tokens.js` is a
+union — `main`'s nav route palette **and** the redesign's glass surfaces,
+`t.layer` and `t.shadow.float`. `@env` over `process.env.*`, because React
+Native's preset does not substitute the latter. `CorridorPicker.jsx` came back:
+`main` deleted it in `20108bc`, the redesign still mounts it inside `RouteSheet`,
+and git took the delete silently — `verify_parse` caught it.
+
+### `mobile-app/node_modules` was a tracked symlink pointing at itself
+
+Added by accident in `7f21c84`. Every checkout got an ELOOP where the install
+should be, and `verify_parse` could not run in the main worktree at all.
+Untracked; `.gitignore` now says `node_modules` without the trailing slash,
+because `node_modules/` matches a **directory** only — which is how a symlink of
+that name slipped past it.
+
+### Vision: measured, and it is not an engineering bug
+
+Through the live `POST /verify-incident`, on the model's own held-out test set:
+**119/120 = 99.2%**, median confidence 1.000. Preprocessing, class mapping (by
+name, not index), confidence and serialisation are all correct. EXIF orientation
+was tested as a hypothesis and ruled out — the client uploads 640×640 with the
+tag stripped.
+
+The ground-photo failure is **distribution, not code**: both hazard classes are
+satellite/aerial imagery and `NORMAL_TERRAIN` is the only class trained on
+ground-level photography, so a driver's photo of anything lands nearest it.
+Open Q8 stands, unchanged. The dispatcher card already words this honestly
+("Ground photos are outside this model's training data, so trust the image over
+the class") and `auto_block_on_ai_verdict` remains false, so the model never
+closes a road.
+
+### Verified on the handset (V2504, wireless adb, `com.drishti`)
+
+Rebuilt APK, address asserted inside the bundle and the cleartext allowlist.
+Report → **HAZARD REPORT SENT** over a cloud-upload glyph, tiles reading
+**ON REVIEW** (was ROAD OBSTRUCTION AHEAD with a stuck "COSTING…"); backend
+`pending_dispatcher_approval`, 0 blocked. After approval: **LANDSLIDE AHEAD**,
+**+38 MIN / +11.4 KM** — positive, the baseline fix — the offer sheet drawn
+**above** MapRail, and on accept **NEW ROUTE · Shillong · 106 km · 4 hr · 13:38**
+with "Rerouted — 105.8 km". Corridor switching, RouteSheet, all four tabs, LIVE
+chip and telemetry all exercised. `unit="°"` renders a real degree glyph.
+
+### Suite, from the merged tree
+
+15/15 green: ai-services 62 passed / 1 skipped, native 54 checks,
+travel_time 8, routeHeading 10, imu 2, verify_parse 56 files,
+verify_hardening, verify_runtime, verify_places_seed, map_style_verify 8,
+**route_alternatives_verify (previously never run) ALL CHECKS PASSED**,
+reroute_proposal_verify, incident_visibility_verify, verify_handset_contract
+(95,164 → 106,540, delta 11,375 m), e2e_verify, dark-zone mission
+(edge 150110, +11,375 m), dashboard verify.mjs 27 checks.
+
+A leftover **verified** incident from the 2026-09-08 handset demo was blocking
+7 edges around edge 150110, which is why the first run of
+`route_alternatives_verify` failed 7 checks. `scripts/demo_reset.sh` is the
+precondition; the failure was dirty state, not code.
 
 ---
 
