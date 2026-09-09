@@ -612,7 +612,14 @@ export async function rerouteAffectedTrips(rawEdgeId, incidentId, incident = nul
     // to compare with. planned_duration_sec is null on a trip created before
     // migration 010; the distance still measures, so the card degrades to
     // distance-only rather than to nothing.
+    // Two different questions, and conflating them is what put a saving on a
+    // hazard detour. `previous` costs the WHOLE route being replaced -- it is
+    // stored beside previous_route and is what a decline restores, so it must
+    // keep measuring the same thing that geometry does. `ahead` costs only
+    // what is left of it from the truck's current position, which is the
+    // baseline the driver's card compares the detour against.
     const previous = await previousCosting(trip.trip_id);
+    const ahead = await remainingCosting(trip.trip_id, from, previous);
 
     const rerouteId = await withTransaction(async (client) => {
       // previous_route is captured from the row being overwritten, in the
@@ -661,15 +668,23 @@ export async function rerouteAffectedTrips(rawEdgeId, incidentId, incident = nul
       // before, which is why nothing here is a breaking change.
       reroute_id: rerouteId,
       requires_ack: true,
-      previous_distance_m: previous.distanceM,
-      previous_time_sec: previous.durationSec,
+      // Measured from where the truck is, because new_distance_m is too.
+      // These two and the deltas below are one arithmetic statement and they
+      // all share an origin; see remainingCosting for what happens when they
+      // do not.
+      previous_distance_m: ahead.distanceM,
+      previous_time_sec: ahead.durationSec,
+      // The whole road being replaced, which is a different quantity: it is
+      // what previous_route draws and what the dispatcher's board labels a
+      // superseded route with.
+      previous_route_total_m: previous.distanceM,
       // Pre-computed rather than left to the client: two clients doing this
       // subtraction themselves is two chances to disagree about what the
       // driver was told, and the dashboard and the handset must not.
-      delta_distance_m: Number.isFinite(previous.distanceM)
-        ? route.distanceM - previous.distanceM : null,
-      delta_time_sec: Number.isFinite(previous.durationSec)
-        ? route.durationSec - previous.durationSec : null,
+      delta_distance_m: Number.isFinite(ahead.distanceM)
+        ? route.distanceM - ahead.distanceM : null,
+      delta_time_sec: Number.isFinite(ahead.durationSec)
+        ? route.durationSec - ahead.durationSec : null,
 
       // Which of the alternatives this is, and whether it truly avoids the
       // hazard. `avoids_closure: false` is the honest report of the case
@@ -723,6 +738,56 @@ async function previousCosting(tripId) {
     distanceM: Number.isFinite(stored) ? stored
       : (Number.isFinite(measured) ? measured : null),
     durationSec: Number.isFinite(duration) ? duration : null,
+  };
+}
+
+/**
+ * The costing the driver is actually deciding against: the part of the route
+ * they have NOT driven yet.
+ *
+ * The detour is planned from where the truck IS (see currentPosition), so
+ * comparing it with the trip's full planned distance quietly credits the
+ * diversion with every metre already covered. On the handset, a truck 4,353 m
+ * along the Guwahati corridor was offered a genuine +1,104 m hazard detour as
+ * "−3.2 km · 9 min shorter" -- the reroute card sold a diversion round a
+ * landslide as a saving. Both sides of the comparison have to start from the
+ * same place.
+ *
+ * The distance is measured, not estimated: ST_LineLocatePoint finds where the
+ * truck sits on its own route and ST_LineSubstring takes what is left of it.
+ * The duration is the trip's stored costing scaled by the fraction remaining
+ * -- the route's own average applied to the route's own tail. That is an
+ * allocation of a figure the model did produce, not a guess at a speed it
+ * never did, which is the line previousCosting draws and this keeps.
+ *
+ * Falls back to the whole-route costing whenever the remainder cannot be
+ * measured (no fix for this truck, so currentPosition returned the trip
+ * origin; a trip with no geometry), which is the pre-existing behaviour and
+ * is correct there: a truck at its origin has driven nothing.
+ */
+async function remainingCosting(tripId, from, whole) {
+  if (!from || !Number.isFinite(Number(from.lat)) || !Number.isFinite(Number(from.lng))) {
+    return whole;
+  }
+  const { rows } = await query(
+    `SELECT ST_Length(ST_LineSubstring(planned_route,
+              ST_LineLocatePoint(planned_route,
+                ST_SetSRID(ST_MakePoint($2, $3), 4326)), 1)::geography) AS remaining_m,
+            ST_Length(planned_route::geography) AS full_m
+       FROM trips
+      WHERE id = $1 AND planned_route IS NOT NULL`,
+    [tripId, Number(from.lng), Number(from.lat)]);
+  const row = rows[0];
+  if (!row) return whole;
+
+  const remaining = Number(row.remaining_m);
+  const full = Number(row.full_m);
+  if (!Number.isFinite(remaining) || !Number.isFinite(full) || full <= 0) return whole;
+
+  const fraction = Math.min(1, Math.max(0, remaining / full));
+  return {
+    distanceM: remaining,
+    durationSec: Number.isFinite(whole.durationSec) ? whole.durationSec * fraction : null,
   };
 }
 

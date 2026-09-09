@@ -279,6 +279,66 @@ async function main() {
       - secondRun.proposal.new_distance_m) < 1, 'the accepted detour was not kept');
     ok(`trip holds the accepted ${(secondRun.proposal.new_distance_m / 1000).toFixed(1)} km detour`);
 
+    // --------------------------------------------- 7b. a moving truck
+    // The figures on the reroute card answer "compared with carrying on",
+    // and the detour is planned from where the truck IS. A baseline taken
+    // from the trip's origin therefore credits the diversion with every
+    // metre already driven. Observed on the handset: 4,353 m along the
+    // corridor turned a genuine +1,104 m detour into "−3.2 km · 9 min
+    // shorter" -- a hazard diversion sold to the driver as a saving.
+    //
+    // Every other case in this file leaves the truck at the trip origin,
+    // where remaining == full and the two baselines are the same number,
+    // which is exactly why the defect survived this suite.
+    say('a moving truck is compared with the road ahead, not the road behind');
+    await api('POST', `/incidents/${secondRun.incidentId}/clear`);
+    const moving = await api('POST', '/trips',
+      { truck_id: truck.id, from: GUWAHATI, to: SHILLONG });
+    assert.equal(moving.status, 201, JSON.stringify(moving.body));
+    const movingTripId = moving.body.trip.id;
+
+    // Put the truck a fifth of the way along the road it is driving.
+    await pool.query(
+      `INSERT INTO truck_last_seen (truck_id, geom, source, speed_mps, captured_at)
+       SELECT $1, ST_LineInterpolatePoint(planned_route, 0.2), 'gps', 12, now()
+         FROM trips WHERE id = $2
+       ON CONFLICT (truck_id) DO UPDATE SET geom = EXCLUDED.geom,
+         captured_at = EXCLUDED.captured_at`,
+      [truck.id, movingTripId]);
+
+    const { rows: [ahead] } = await pool.query(
+      `SELECT ST_Length(ST_LineSubstring(planned_route, 0.2, 1)::geography) AS remaining_m,
+              ST_Length(planned_route::geography) AS full_m
+         FROM trips WHERE id = $1`, [movingTripId]);
+    const remainingM = Number(ahead.remaining_m);
+    const drivenM = Number(ahead.full_m) - remainingM;
+    assert.ok(drivenM > 1000,
+      `truck is only ${Math.round(drivenM)} m along its route -- too little to `
+      + 'tell the two baselines apart');
+
+    const target3 = await midRouteEdge();
+    const third = await provokeProposal(truck.id, target3, driver);
+    cleanup.push(() => api('POST', `/incidents/${third.incidentId}/clear`));
+    assert.ok(third.proposal, 'the moving truck never received a proposal');
+    const m = third.proposal;
+
+    assert.ok(Math.abs(m.previous_distance_m - remainingM) < 50,
+      `previous_distance_m is ${Math.round(m.previous_distance_m)} m, but the road `
+      + `still ahead of the truck measures ${Math.round(remainingM)} m -- the `
+      + 'baseline is starting at the origin and crediting the detour with the '
+      + `${Math.round(drivenM)} m already driven`);
+    assert.ok(Math.abs((m.previous_distance_m + m.delta_distance_m) - m.new_distance_m) < 1,
+      'delta_distance_m does not reconcile the two distances');
+    // The whole point of the fix: the diversion round a closed road is not
+    // reported as a saving to a truck that has been driving towards it.
+    assert.ok(m.delta_distance_m > -50,
+      `the detour is quoted as ${(m.delta_distance_m / 1000).toFixed(1)} km SHORTER `
+      + 'than carrying on, which is the origin-baseline bug');
+    ok(`baseline is the ${(remainingM / 1000).toFixed(1)} km ahead, not the `
+       + `${(Number(ahead.full_m) / 1000).toFixed(1)} km route `
+       + `(${m.delta_distance_m >= 0 ? '+' : ''}${(m.delta_distance_m / 1000).toFixed(1)} km, `
+       + `${Math.round(drivenM)} m already driven)`);
+
     // -------------------------------------------------------- 8. restore
     say('clear the incident and leave routing exactly as found');
     for (const undo of cleanup) await undo();
