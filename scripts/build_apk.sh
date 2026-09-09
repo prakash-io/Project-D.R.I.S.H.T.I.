@@ -106,8 +106,27 @@ rm -rf "${TMPDIR:-/tmp}"/metro-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null || tr
 # This is also why the .env edit above only takes effect on a release build:
 # gradle does not treat JavaScript as an input to assembleDebug, which reports
 # BUILD SUCCESSFUL in five seconds having changed nothing.
+# --rerun on createBundleReleaseJsAndAssets is what makes the .env edit above
+# actually reach the handset, and without it this script ships last network's
+# address while reporting BUILD SUCCESSFUL.
+#
+# The bundle task declares its inputs as a file tree of **/*.{js,jsx,ts,tsx}
+# (BundleHermesCTask.kt:32-41). `.env` matches none of those extensions, so it
+# is not an input at all: rewriting API_URL leaves gradle's up-to-date check
+# perfectly satisfied, Metro never runs, and the PREVIOUS index.android.bundle
+# -- carrying the previous IP -- is repackaged into the new APK. Clearing the
+# Metro cache does not help, because Metro is never invoked to consult it.
+#
+# The tell is `> Task :app:createBundleReleaseJsAndAssets UP-TO-DATE` and a
+# 17-second build. Observed on the build this flag was added to prevent: the
+# cleartext allowlist updated correctly (an .xml IS a real resource input)
+# while the bundle still asked for 172.60.0.161, which is the two-address
+# failure reassembled inside a single APK.
+#
+# `--rerun` applies ONLY to the tasks named on the command line, so this stays
+# an incremental build (~25 s); `--rerun-tasks` would rebuild all 476 tasks.
 echo "==> gradle assembleRelease (a few minutes; it bundles and minifies)"
-( cd "$APP/android" && ./gradlew assembleRelease )
+( cd "$APP/android" && ./gradlew createBundleReleaseJsAndAssets --rerun assembleRelease )
 
 APK="$APP/android/app/build/outputs/apk/release/app-release.apk"
 [[ -f "$APK" ]] || { echo "error: build reported success but no APK at $APK" >&2; exit 1; }

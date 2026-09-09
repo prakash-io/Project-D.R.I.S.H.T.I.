@@ -135,6 +135,85 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R14 — 2026-09-09 · Demo bring-up: the stale-bundle half of the two-address trap
+
+Bringing the platform up to connect the handset to the dashboard. The stack
+itself was already running and healthy; what was broken was the link between
+the app and it, in a way the existing guard rails caught but did not fix.
+
+### `scripts/build_apk.sh` shipped the previous network's address
+
+The APK in `dist/` asked for `172.60.0.161:4000` while this laptop was on
+`10.99.201.145`. That is the documented two-address failure, so the fix was a
+rebuild — and the rebuild reproduced it. `scripts/build_apk.sh` rewrote both
+files correctly, gradle reported `BUILD SUCCESSFUL in 17s`, and the script's
+own verifier then said:
+
+        FAIL bundle url http://10.99.201.145:4000 (0x)
+        ok   cleartext allowlist has 10.99.201.145 (res/8G.xml)
+        WARN stale address 172.60.0.161 in assets/index.android.bundle
+
+**Root cause.** `BundleHermesCTask` declares its inputs as a file tree of
+`**/*.{js,jsx,ts,tsx}` (`BundleHermesCTask.kt:32-41`). `.env` matches none of
+those extensions, so it is **not a gradle input at all**. Rewriting `API_URL`
+left the up-to-date check satisfied, `:app:createBundleReleaseJsAndAssets` was
+skipped as `UP-TO-DATE`, Metro never ran, and the previous
+`index.android.bundle` was repackaged into the new APK. Evidence: the bundle on
+disk was timestamped 09:31 against a `.env` written at 11:05, and still
+contained the old IP.
+
+Clearing the Metro cache — which the script already did — cannot help, because
+Metro is never invoked to consult it. That step guards a different hazard (a
+stale *transform* when Metro does run) and was doing nothing here.
+
+The allowlist updated correctly because `network_security_config.xml` is a real
+Android resource and `mergeReleaseResources`/`processReleaseResources` both
+executed. So the two addresses desynchronised *inside a single APK* — the
+original trap reassembled one layer down.
+
+**Fix**: `./gradlew createBundleReleaseJsAndAssets --rerun assembleRelease`.
+`--rerun` applies only to tasks named on the command line, so the build stays
+incremental (26–43 s); `--rerun-tasks` would rebuild all 476 tasks. Verified by
+re-running the script: the task now executes rather than reporting UP-TO-DATE,
+and the verifier passes on both checks with no stale address.
+
+The verifier was already right and already load-bearing. It caught this before
+the phone did, which is the whole reason it counts raw bytes.
+
+### Disk
+
+`demo_reset.sh --check` warned at **1 GiB free**, below the ~5 GiB where
+Postgres starts failing with blank error messages. Reclaimed ~2.7 GiB of
+regenerable build output: the non-buildable top-level `mobile-app/android/app/build`
+(2.1 G, contained only a debug APK), the nav-experience `app-debug.apk` (274 M,
+useless — a debug build has no embedded bundle), and the stale `gmaps-task4`
+build (327 M). `dist/drishti-driver.apk` untouched. Now ~2.6 GiB free; the
+nav-experience `intermediates/` (1.3 G) was deliberately kept so rebuilds stay
+incremental.
+
+### State
+
+`demo_reset.sh` cleared 4 leftover blocked edges and 1 active trip; the
+Guwahati→Shillong baseline asserts **95,164 m** again. The burst-sync worker
+was **not running** — it is a separate process from `npm start` and its absence
+reads as a hung queue rather than an error — and was started.
+
+### The address moved again, mid-session
+
+`10.99.201.145` → `172.168.169.12` while this work was in progress, which
+invalidated the APK built minutes earlier. `dist/drishti-driver.apk` now
+carries `172.168.169.12`, verified in both places. This is the standing risk
+for a venue demo: **the address is compiled in, so a DHCP change is an app
+outage**, recovered by one 45 s `scripts/build_apk.sh`.
+
+### Not verified
+
+The handset was never reachable — `adb devices` and `adb mdns services` both
+empty for the whole session. Nothing in this entry was observed on a phone:
+the APK is verified by byte-counting its contents, not by running it.
+
+---
+
 ## R13 — 2026-09-09 · Final audit: the stranded redesign, and a detour sold as a saving
 
 **Modified**: `backend/src/routes/incidents.js`, `backend/test/reroute_proposal_verify.mjs`,
