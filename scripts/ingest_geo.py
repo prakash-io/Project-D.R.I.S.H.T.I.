@@ -260,6 +260,9 @@ def main() -> int:
                     default=Path("/private/tmp/claude-501/-Users-prakash-drishti/"
                                  "23bc32d8-7d43-4ded-85f9-b6d3f3828efb/scratchpad"))
     ap.add_argument("--skip-districts", action="store_true")
+    ap.add_argument("--csv-only", action="store_true",
+                    help="write road_edges.csv and stop, for a remote load "
+                         "with backend/load_road_edges.mjs")
     args = ap.parse_args()
     args.scratch.mkdir(parents=True, exist_ok=True)
 
@@ -300,6 +303,13 @@ def main() -> int:
                 str(tunnel).lower() in TRUTHY,
                 wkb[i],
             ])
+
+    # The local load below goes through `docker exec` into drishti-postgis, so
+    # it cannot reach a hosted database. For one, stop here and load the CSV
+    # with backend/load_road_edges.mjs, which runs the same SQL over a URL.
+    if args.csv_only:
+        print(f"==> --csv-only: wrote {csv_path}, skipped the local load")
+        return 0
 
     print("==> loading into PostGIS")
     psql("TRUNCATE road_edges RESTART IDENTITY CASCADE;")
