@@ -226,8 +226,13 @@ async function main() {
   driver.emit('subscribe', { room: `truck:${truck.id}` });
   await sleep(150);
 
+  // Only this truck's packets. The dispatchers room carries the whole fleet,
+  // so with test/mock_stream.mjs running alongside, an unfiltered count read
+  // "dispatcher saw 12/10 packets" and failed a pipeline that was fine.
   const broadcasts = [];
-  dispatcher.on('truck_location_update', (p) => broadcasts.push(p));
+  dispatcher.on('truck_location_update', (p) => {
+    if (p.truck_id === truck.id) broadcasts.push(p);
+  });
   const routeUpdates = [];
   driver.on('route_updated', (p) => routeUpdates.push(p));
 
