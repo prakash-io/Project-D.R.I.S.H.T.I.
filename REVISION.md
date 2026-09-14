@@ -135,6 +135,96 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R15 — 2026-09-14 · Pre-push audit of the hosted-database graph load
+
+The working tree held a load of the road graph into a hosted PostGIS
+(Supabase), done from this laptop because `scripts/ingest_geo.py` loads through
+`docker exec` and cannot reach a connection URL. Audited before pushing.
+
+### The hosted graph is complete
+
+Read-only counts against the hosted database: **486,784 edges / 412,914
+nodes**, `road_graph_meta` main component 328126, no `stage_edges` left behind.
+Identical to the local graph and to the 486,784 rows of the CSV it came from.
+
+### Changed before committing
+
+* **`scripts/ingest_geo.py`** — the edit had put `return 0` in front of the
+  entire local load, silently turning DB-02 into "write a CSV". Now opt-in:
+  `--csv-only` writes `road_edges.csv` and stops; the default is the local
+  load again.
+* **`backend/load_road_edges.mjs`** — ran `TRUNCATE road_edges … CASCADE`
+  before reading a byte of the CSV, outside any transaction. A wrong path or a
+  dropped connection against the hosted database would have left an empty
+  graph and, through CASCADE, an emptied incident history. Now: the file is
+  checked before connecting, the CSV is staged first, zero routable rows
+  aborts, and truncate → insert → nodes → components → meta is one
+  transaction. Tested in a throwaway `drishti_loadtest` database (dropped
+  afterwards):
+
+  | case | result |
+  |---|---|
+  | no arguments / missing file | exit 1, database never touched |
+  | 3,000-row subset | 3,000 edges, 2,751 nodes |
+  | malformed CSV | fails at COPY; still 3,000 edges; stage table dropped |
+  | failure mid-swap (`rebuild_road_components` renamed away) | rolled back; still 3,000 edges / 2,751 nodes |
+  | full CSV | 486,784 / 412,914 / main 328126, 2,075 s |
+
+* **`backend/simulate_dark_zone_mission.mjs`** — counted every truck in the
+  `dispatchers` room, so with `test/mock_stream.mjs` running it failed
+  "dispatcher saw 12/10 packets" on a healthy pipeline. It now counts only its
+  own truck, and passes with the stream live.
+
+### Not committed
+
+* **`backend/run_psql_upload.sh`** hardcodes the hosted database password.
+  Never in git history (`git log --all -S`). Left untracked — and it is **not**
+  gitignored, so never `git add -A` in this tree. `load_road_edges.mjs` does
+  the same job from `DATABASE_URL`.
+* Data and research outputs: `datasets/`, `cleaned_dataset/`,
+  `excluded_domain/`, `review/`, `scratch/` (~1.4 GB), the CSV/JSON/PNG
+  outputs, the 31 Aug vision-dataset scripts and `docs/` reports, `.codex/`,
+  `AGENTS.md`, `ai-services/models/`, `docs/DEMO_RUNBOOK.html`.
+
+### Committed as found
+
+* `pg-copy-streams ^7.0.0` (7.0.0 installed) — `COPY … FROM STDIN` over a URL,
+  for `load_road_edges.mjs` and the generic `backend/run_copy.mjs`.
+* `backend/verify_handset_contract.mjs` — passes. It deliberately leaves its
+  closure verified, so run `scripts/demo_reset.sh` after it: every other
+  verifier asserts the 95,164 m baseline.
+* `dashboard/package-lock.json` — dedupes `@deck.gl/mesh-layers` to a single
+  9.3.10 (was 9.3.11 top-level plus a nested 9.3.10). `npm ci`, `npm run check`
+  and `verify.mjs` 27/27 on it.
+* `dashboard/.gitignore` — `.vercel`.
+* `mobile-app/App.jsx` — last-resort `API_URL` fallback 172.60.2.75 →
+  172.60.0.161. `.env` drives the build (R14); this only applies when the key
+  is missing.
+
+### Verification (2026-09-14)
+
+| suite | result |
+|---|---|
+| `pytest ai-services/tests` | 62 passed, 1 skipped |
+| native `make … run` | 54 checks, 0 failures |
+| `dashboard node --test test/` / `backend travel_time.test.mjs` | 10/10, 8/8 |
+| `dashboard npm run check` (new lock) | build + three.js isolation OK |
+| `e2e_verify.mjs` | passed, 95,164 → 106,540 m, restored |
+| `dashboard verify.mjs` (new lock) | 27 checks, 0 failures |
+| `verify:alternatives` / `verify:reroute` / `verify:visibility` | passed |
+| `simulate_dark_zone_mission.mjs` | passed, with and without the mock stream |
+| `verify_handset_contract.mjs` | passed, +11,375 m |
+
+### A stall that was the laptop sleeping
+
+One live run froze for 15+ minutes with every service healthy: the Mac had
+entered Deep Idle sleep (`pmset -g log`), suspending the stream and
+`verify.mjs` mid-run, and a `basemap tiles 0 requests` failure came out of the
+same run. Rerun under `caffeinate -i`, the identical checks passed. Run long
+live chains under `caffeinate -i`.
+
+---
+
 ## R14 — 2026-09-09 · Demo bring-up: the stale-bundle half of the two-address trap
 
 Bringing the platform up to connect the handset to the dashboard. The stack

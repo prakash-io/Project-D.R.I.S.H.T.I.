@@ -63,7 +63,7 @@ import {
 // literals below are the last-resort defaults if a key is missing from .env;
 // allowUndefined is on, so a missing key is `undefined` rather than a build
 // error. Change .env and rebuild -- see scripts/build_apk.sh.
-const API_URL = ENV_API_URL ?? 'http://172.60.2.75:4000';
+const API_URL = ENV_API_URL ?? 'http://172.60.0.161:4000';
 const TRUCK_ID = ENV_TRUCK_ID ?? '651692e8-374b-401f-9b9f-e3ed86342ab5';
 const ALERT_LANG = ENV_ALERT_LANG ?? 'as';
 
