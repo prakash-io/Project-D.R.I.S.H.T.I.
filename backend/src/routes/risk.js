@@ -135,6 +135,23 @@ riskRouter.post('/route', async (req, res, next) => {
       }
     }
 
+    // The AI service is not deployed beside the hosted backend -- it needs the
+    // GeoTIFFs and KDTree pickles, which are gigabytes -- so a sweep run in
+    // the cloud always ends in the branch above. `road_edges.risk_score` is
+    // the SAME model's output, written by POST /risk/refresh and already what
+    // /risk/segments draws, so falling back to it shows the dispatcher the
+    // hazards the overlay is showing them anyway. Stale by definition, and
+    // said so in `degraded` rather than passed off as a live score: an empty
+    // list reads as "no hazards ahead", which is the one answer that is worse
+    // than an old one.
+    if (degraded && hazards.length === 0) {
+      const stored = await storedHazards(points, threshold);
+      if (stored.length > 0) {
+        hazards.push(...stored);
+        degraded = `${degraded} — showing ${stored.length} stored score(s)`;
+      }
+    }
+
     res.json({
       hazards,
       sampled: points.length,
@@ -146,6 +163,59 @@ riskRouter.post('/route', async (req, res, next) => {
     next(error);
   }
 });
+
+/// How far from a sampled point a stored score may sit and still be about
+/// this road. 2 km: the sweep samples every 10 km, so a nearer edge is the
+/// corridor itself rather than a parallel road that happens to be scored.
+const STORED_MATCH_M = 2000;
+
+/**
+ * The flagged edges nearest the sampled points, from `road_edges.risk_score`.
+ *
+ * The fallback for a sweep whose AI service is unreachable. One KNN per point
+ * over the handful of rows already above the threshold -- not a scan -- and
+ * de-duplicated, because consecutive samples 10 km apart on the same long
+ * edge would otherwise report it twice.
+ */
+async function storedHazards(points, threshold) {
+  const out = [];
+  const seen = new Set();
+
+  for (const [lng, lat] of points) {
+    const { rows } = await query(
+      `SELECT id, risk_score, risk_updated,
+              ST_Y(ST_LineInterpolatePoint(geom, 0.5)) AS lat,
+              ST_X(ST_LineInterpolatePoint(geom, 0.5)) AS lng
+       FROM road_edges
+       WHERE risk_score >= $1
+         AND ST_DWithin(geom::geography,
+                        ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4)
+       ORDER BY geom <-> ST_SetSRID(ST_MakePoint($2, $3), 4326)
+       LIMIT 1`,
+      [threshold, lng, lat, STORED_MATCH_M],
+    );
+
+    const row = rows[0];
+    if (!row || seen.has(String(row.id))) continue;
+    seen.add(String(row.id));
+    out.push({
+      lat: Number(row.lat),
+      lng: Number(row.lng),
+      // The stored column carries a probability, not a class: road_edges has
+      // no room for one. `null` renders as "Hazard" rather than inventing a
+      // threat the model did not name on this run.
+      kind: null,
+      probability: Number(row.risk_score),
+      rainfall_24h_mm: null,
+      rainfall_intensity_mmh: null,
+      weather_source: 'stored risk_score',
+      window_start_utc: null,
+      scored_at: row.risk_updated,
+    });
+  }
+
+  return out;
+}
 
 /// Walk the polyline and emit a point every `stepKm`, always including the
 /// first and last vertex so the origin and destination are covered.

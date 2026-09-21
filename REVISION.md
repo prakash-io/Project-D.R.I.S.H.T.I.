@@ -135,13 +135,104 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R18 — 2026-09-22 · The public link's sweep: a backend asking itself for predictions
+
+Two faults reported from the deployed board: *"Partial sweep — AI service
+returned 404"* and *"Forecast unavailable — no route or position to place a
+forecast on"*. Different causes, and neither was the dashboard.
+
+### The backend was calling itself
+
+`AI_SERVICE_URL` is unset on Northflank, so `config.aiServiceUrl` falls back to
+`http://localhost:8000` (`src/config.js:30`) — and `backend/Dockerfile` EXPOSEs
+**8000**, which is the port the backend itself listens on there. So
+`predictHazard` posted `/predict-hazard` to the backend, and Express answered
+what Express answers for an unknown route. Confirmed directly:
+
+        POST https://p01--drishti--k7m4lcvky72w.code.run/predict-hazard
+        404  Cannot POST /predict-hazard
+
+A 404 rather than `ECONNREFUSED` is the whole tell: something *was* listening.
+
+### The sweep now falls back to the stored scores
+
+The AI service cannot simply be deployed beside it: it loads the GeoTIFFs and
+the KDTree pickles, gigabytes that are deliberately not in git (`.gitignore`,
+`data/**`). But its output is already in the database — `/risk/refresh` writes
+`road_edges.risk_score` and `/risk/segments` draws exactly that.
+
+So `POST /risk/route` now falls back to those stored scores when the AI service
+is unreachable: one KNN per sampled point over the handful of rows above the
+threshold, de-duplicated, `weather_source: "stored risk_score"`, and the
+staleness stated in `degraded` rather than dressed up as a live forecast. An
+empty list reads as "no hazards ahead", which is the one answer worse than an
+old one.
+
+Verified against the real Guwahati→Shillong corridor with the AI service dead
+(`AI_SERVICE_URL=http://127.0.0.1:9`):
+
+        sampled: 11 | hazards: 6 | threshold: 0.85
+        degraded: AI service unreachable: connect ECONNREFUSED 127.0.0.1:9
+                  — showing 6 stored score(s)
+        0.957 stored risk_score  lat=25.9782 lng=91.8605  scored_at 2026-09-08
+
+### The hosted graph had no scores to fall back to — and `id` is not a key
+
+`road_edges.risk_score` sat at its `DEFAULT 0` on Supabase: the overlay had
+nothing to draw and "Segments flagged" was 0. The 173 scored edges (160 at or
+above the 0.85 flag threshold) were computed locally, where the model and its
+rasters live, and copied in through the SQL editor.
+
+**The first copy was keyed on `id`, and that is wrong.** Both databases hold
+the same 486,784 rows from the same CSV, but the two loads inserted them in
+different orders and `TRUNCATE … RESTART IDENTITY` renumbered from 1. Id 99437
+is a 26-point road at 26.4696 N locally and a 10-point road at 26.1872 N on the
+hosted graph. The scores landed on the wrong roads and *looked* right:
+`above_085 = 160`, `max = 0.9938`, matching local exactly. Matching counts and
+matching values prove only that an UPDATE ran. Comparing the **geometry** is
+what caught it.
+
+So the copy is keyed on where the road is instead: each row carries the
+midpoint of a locally flagged edge, and the hosted database matches its own
+nearest edge (`ORDER BY geom <-> point LIMIT 1` inside `ST_DWithin(…, 200)`).
+Renumbering cannot affect that. Verified by geometry — hosted against local,
+not score against score:
+
+        hosted 0.9938  26 pts  [91.57419, 26.46963]   local 26 pts  [91.57419, 26.46963]
+        hosted 0.9926  55 pts  [90.97007, 26.43134]   local 55 pts  [90.97008, 26.43134]
+        hosted 0.9926  22 pts  [92.17744, 26.11203]   local 22 pts  [92.17744, 26.11203]
+
+160 flagged edges, and `/risk/segments` grew from 101 kB to 577 kB in the
+process: the right roads are longer than the wrong ones the scores had been
+pinned to, which is the same fact the point counts show.
+
+Two things the revert taught: `risk_score` is `REAL NOT NULL DEFAULT 0`
+(`001_init.sql:124`), so "unset" is 0 and a revert to NULL aborts the batch;
+and Supabase's editor runs the statements as one batch, so that abort left the
+bad copy in place until the corrected script ran.
+
+### The forecast had no route to sit on
+
+`useTruckAnalytics` needs the selected truck to have a trip with planned
+geometry or a last position (`src/hooks/useTruckAnalytics.js:72`). The hosted
+trucks had neither, so the panel said so. Opening a trip through the hosted
+API — `POST /trips`, 95,164 m / 296 edges — gave it one, and `POST
+/weather/route` from Northflank returns live Open-Meteo readings. The forecast
+never needed the AI service at all.
+
+### Still true
+
+The AI service remains undeployed, so a *live* sweep, incident verification and
+fresh scoring are unavailable in the cloud; what the board shows is the 09-08
+scoring, labelled as such.
+
+---
+
 ## R17 — 2026-09-22 · What the working deployment was actually wired to
 
-R16 restored the *build*. It did not restore what the built page talks to: with
-no `VITE_API_URL`, `dashboard/src/lib/api.js` falls back to
-`http://localhost:4000`, so the deployed link only worked on the machine
-running the stack. This entry is the archaeology of the last deployment that
-did work, and the repair.
+R16 restored the *build*. This entry is the archaeology of what the deployed
+page actually talks to — and the repair that was genuinely needed, which turned
+out to be the hosted **database**, not the build configuration.
 
 ### The old bundle names its backend
 
@@ -205,11 +296,27 @@ planned**, matching local on every one, and the 3 pinned trucks present.
 the seeder replans over the *current* graph, by design, and local and hosted
 now agree.
 
-### `VITE_API_URL` restored
+### `VITE_API_URL` was never missing — and R16 got this wrong
 
-Added in the Vercel project as a **Config** (not Secret) variable for
-Production — a build-time public URL that Vite inlines into the bundle anyway.
-Set through the dashboard UI because the API is blocked here.
+**Correction to R16**, which states that the deployed dashboard falls back to
+`http://localhost:4000`. It does not. `VITE_API_URL` **and** `VITE_SOCKET_URL`
+have existed in the Vercel project since **Sep 2**, both Production.
+
+The error was a truncated reading: the variables list sorts newest first, and
+the ten Supabase variables added on 09-20 filled the visible page, so the two
+Sep-2 `VITE_` rows sat below the fold and I concluded they were absent. Two
+attempts to "add" `VITE_API_URL` were both refused as duplicates, so nothing in
+the project was changed.
+
+Proof, from the bundle the live link serves after R16's redeploy
+(`index-DuOIZeUb.js`): **one** occurrence of
+`https://p01--drishti--k7m4lcvky72w.code.run`, **zero** of `localhost:4000`.
+R16's redeploy had therefore already wired the page to Northflank; what was
+missing was only the data behind it.
+
+`VITE_SOCKET_URL` is vestigial: `dashboard/src/lib/api.js` reads only
+`VITE_API_URL`, and `useTelemetry.js` opens its socket against that same
+`API_URL`.
 
 ### Still missing on the public link
 
