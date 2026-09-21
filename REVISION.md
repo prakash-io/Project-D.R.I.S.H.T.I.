@@ -135,6 +135,94 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R17 — 2026-09-22 · What the working deployment was actually wired to
+
+R16 restored the *build*. It did not restore what the built page talks to: with
+no `VITE_API_URL`, `dashboard/src/lib/api.js` falls back to
+`http://localhost:4000`, so the deployed link only worked on the machine
+running the stack. This entry is the archaeology of the last deployment that
+did work, and the repair.
+
+### The old bundle names its backend
+
+Every old deployment URL is 302 (deployment protection) and the alias had
+already moved, so the 09-02 bundle was unreachable by `curl`. Opened instead in
+the signed-in browser — protection passes for the owner — and read:
+
+        https://p01--drishti--k7m4lcvky72w.code.run
+
+`.code.run` is **Northflank**. The bundle contains **zero** occurrences of
+`localhost:4000`, so that build was made with `VITE_API_URL` set to the
+Northflank service.
+
+**Koyeb is a red herring.** `backend/Dockerfile:16` says "Koyeb provides PORT",
+and `~/.koyeb/bin/koyeb` exists — but there is no `~/.koyeb.yaml`, the CLI has
+never been configured, and the dashboard only ever shows a login page. The
+comment records an intention; Northflank is where it went.
+
+### That backend is still alive, and its database is nearly empty
+
+        /health  200   486,784 edges / 412,914 nodes   districts: 0
+        ai_service: http://localhost:8000     (nothing listens there)
+        corridors: []   trucks: []   incidents: []   risk/segments: []
+
+So the hosted Supabase carried the graph — loaded 09-01/02, R15 — and nothing
+else. A public visitor would have seen a working map with no fleet.
+
+### This network blocks more than Vercel
+
+R16 found `api.vercel.com:443` unreachable. The same block covers Postgres:
+`psql` to the Supabase pooler times out on **5432 and 6543**, by hostname and
+by both resolved IPs, while HTTPS to the same project answers 401 and
+`github.com` is fine. `nc -z` reports the port "open", which is a middlebox
+answering, not Postgres. Everything routes over `en0` via 172.60.0.254 with no
+VPN capture.
+
+Consequence: the hosted database had to be seeded **over HTTPS**, through the
+Supabase SQL editor, with the browser as the transport.
+
+### Corridors planned server-side, not shipped
+
+The 10 corridors are 941 kB of planned geometry; `seed_corridors.mjs` cannot
+run without a socket to the database. So the seed plans them **inside** the
+hosted database instead:
+
+        ST_LineMerge(ST_Collect(edge_geom ORDER BY seq))   over route_astar(...)
+
+Validated against the local database before touching production: for `ghy-shl`
+it returns a single LINESTRING of **296 edges / 95,164 m / 4,411 points** —
+what `seed_corridors.mjs` assembles in JavaScript, to the metre and the vertex.
+
+Seeded and verified through the hosted backend's own API: **10/10 corridors
+planned**, matching local on every one, and the 3 pinned trucks present.
+
+        ghy-shl  95,164 m/296    ghy-tez 154,224/466   slg-gtk 106,161/93
+        dmu-koh  68,069/183      agt-udp  50,001/224   imf-dmu 201,168/410
+        itn-ghy 283,268/686      sch-azl 166,279/394   ghy-dbr 415,127/1449
+        shl-sch 197,536/646
+
+`shl-sch` replans to 646 edges / 197,536 m against the stored 732 / 199,811 —
+the seeder replans over the *current* graph, by design, and local and hosted
+now agree.
+
+### `VITE_API_URL` restored
+
+Added in the Vercel project as a **Config** (not Secret) variable for
+Production — a build-time public URL that Vite inlines into the bundle anyway.
+Set through the dashboard UI because the API is blocked here.
+
+### Still missing on the public link
+
+* **The AI service is not deployed.** The hosted backend points `ai_service` at
+  its own `localhost:8000`, so `/risk/segments` returns no features and incident
+  verification cannot run. The Disruption Overlay will be empty for a visitor.
+  `ai-services/Dockerfile` exists (R15) and has never been deployed anywhere.
+* **`districts: 0`** on the hosted database.
+* **No live telemetry**: trucks appear, but nothing moves unless something is
+  streaming to the hosted backend. The handset can, if pointed at it.
+
+---
+
 ## R16 — 2026-09-21 · The dashboard deploy: why every build since 09-09 failed
 
 The whole platform was restarted and re-verified (all green, table below), and
