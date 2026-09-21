@@ -135,6 +135,86 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R16 — 2026-09-21 · The dashboard deploy: why every build since 09-09 failed
+
+The whole platform was restarted and re-verified (all green, table below), and
+the live dashboard was redeployed. The redeploy is what took the work.
+
+### Every production build had been failing for 12 days
+
+`vercel ls` showed every Production deployment since 09-09 as `● Error` after
+~4 s; the newest `Ready` one was from 09-02, the day the project was created.
+The build log says it in one line:
+
+        sh: line 1: vite: command not found
+        Error: Command "vite build" exited with 127
+
+**Root cause**: the Vercel project's **Root Directory is `.`**, the repo root —
+and there is no `package.json` there. The dashboard is `dashboard/`. Vercel
+installed nothing, so `vite` did not exist. Nothing about the dashboard code
+was ever wrong; the site kept serving the 09-02 build the whole time.
+
+**Fix, in the repo rather than in project settings** (`vercel.json` at the
+root, so a git build works whatever the dashboard setting says):
+
+        "installCommand": "npm --prefix dashboard ci",
+        "buildCommand":   "npm --prefix dashboard run build",
+        "outputDirectory": "dashboard/dist"
+
+Verified by running that exact build command from the repo root: exit 0,
+`dashboard/dist` with all four chunks.
+
+### `api.vercel.com` is blocked on this network
+
+A CLI deploy (`vercel deploy --prod`) was the first attempt and failed twice
+with `fetch failed`. Not the CLI: **TCP 443 to api.vercel.com never connects**,
+by hostname or by direct IP (76.76.21.112), on IPv4 and IPv6 — one probe hung
+905 s — while `vercel.com` and `github.com` both answer 200 and DNS resolves
+fine. `vercel ls`/`inspect` had worked an hour earlier, so it is intermittent
+or newly imposed. No proxy is configured; `utun0-3` are up.
+
+Consequence: **deploy by pushing to `main`**, which Vercel builds on its own
+side from GitHub, and never needs this laptop to reach the API. That also keeps
+the aliases — the link is already submitted to SIH and must not change:
+
+* `https://dashboard-kohl-alpha-84.vercel.app` (200, serves the dashboard)
+* `https://dashboard-prakash-ios-projects.vercel.app` (302, deployment protection)
+
+### `dashboard/.vercelignore`
+
+The first CLI attempt would have uploaded **151 MB** of `cdp-profile/` — the
+throwaway Chrome profile `verify.mjs` leaves behind — plus its screenshots and
+`dist/`. `.gitignore` does not apply to the Vercel CLI, so those are repeated
+in `.vercelignore`. Kept even though the deploy now goes through git.
+
+### `VITE_API_URL` stays unset, deliberately
+
+The deployed dashboard falls back to `http://localhost:4000`
+(`dashboard/src/lib/api.js`), so the link works when opened **on the machine
+running the stack** — which is how it is demonstrated. Pointing it elsewhere
+needs a publicly reachable backend, which does not exist yet; that is Phase 3,
+not a deploy setting.
+
+### Full demo re-verification, 2026-09-21
+
+Docker Desktop was not running; containers, backend, worker, AI service and
+dashboard were restarted. Graph intact at 486,784 / 412,914, no open incidents.
+
+| check | result |
+|---|---|
+| `pytest ai-services/tests` | 62 passed, 1 skipped |
+| native `make … run` | 54 checks, 0 failures |
+| unit tests (dashboard / backend) | 10/10, 8/8 |
+| `e2e_verify.mjs` | 95,164 → 106,540 m (+11,375 m), restored exactly |
+| `verify:reroute` | PASS |
+| `verify:visibility` | OK, 4 groups |
+| `verify_handset_contract.mjs` | OK, +11,375 m |
+| `dashboard verify.mjs` | 27 checks, 0 failures |
+| `verify:alternatives` | ALL CHECKS PASSED |
+| `simulate_dark_zone_mission.mjs` | PASSED — 600 EKF fixes, burst sync, reroute, notify |
+
+---
+
 ## R15 — 2026-09-14 · Pre-push audit of the hosted-database graph load
 
 The working tree held a load of the road graph into a hosted PostGIS

@@ -1,0 +1,13 @@
+# What `vercel deploy` must not upload from this directory.
+#
+# The CLI uploads the working directory, and verify.mjs leaves a 151 MB
+# throwaway Chrome profile here (cdp-profile/) plus its screenshots. Uploading
+# those failed the deploy outright with "fetch failed" before the build even
+# started. .gitignore does not cover the CLI, so it is repeated here.
+node_modules
+dist
+cdp-profile
+dash_*.png
+test
+.vercel
+.DS_Store
