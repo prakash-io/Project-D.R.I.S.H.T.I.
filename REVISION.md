@@ -135,6 +135,33 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R19 — 2026-09-22 · The SPA fallback R16 took away
+
+`/weather` and `/analytics` returned Vercel's **404 NOT_FOUND** on the deployed
+link. Reproduced outside the browser:
+
+        /                 200
+        /weather          404
+        /analytics        404
+
+`main.jsx` mounts a **`BrowserRouter`**, so those paths exist only once
+`index.html` has been served; App.jsx's own `<Route path="*">` cannot run
+before that. Clicking through the sidebar worked — that is client-side
+routing — but loading or refreshing a sub-route asked Vercel for a file that
+is not in `dashboard/dist`.
+
+**Self-inflicted, by R16.** Vercel's Vite preset supplies that catch-all
+rewrite on its own; giving the project an explicit `buildCommand` and
+`outputDirectory` in `vercel.json` to fix the failing build replaced the
+preset's routing with none. The fix restores it explicitly:
+
+        "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+
+Assets are unaffected: Vercel checks the filesystem before rewrites, so
+`/assets/*` still resolves to the real files rather than to `index.html`.
+
+---
+
 ## R18 — 2026-09-22 · The public link's sweep: a backend asking itself for predictions
 
 Two faults reported from the deployed board: *"Partial sweep — AI service

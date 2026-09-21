@@ -3,5 +3,6 @@
   "framework": "vite",
   "installCommand": "npm --prefix dashboard ci",
   "buildCommand": "npm --prefix dashboard run build",
-  "outputDirectory": "dashboard/dist"
+  "outputDirectory": "dashboard/dist",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
