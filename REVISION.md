@@ -135,6 +135,53 @@ phone IMU @ 10 Hz ── ax, ay, az, gyro yaw/pitch/roll
 
 ---
 
+## R20 — 2026-09-23 · Row level security, and a project that is not only ours
+
+Supabase's advisor reported RLS disabled on the `public` schema: every table
+PostgREST exposes was readable by anyone holding the project's anon key.
+
+Enabled on all 14 D.R.I.S.H.T.I. tables — `corridors`, `districts`,
+`incident_blocked_edges`, `incidents`, `reroutes`, `road_edges`,
+`road_graph_meta`, `road_nodes`, `schema_migrations`, `telemetry`,
+`trip_routes`, `trips`, `truck_last_seen`, `trucks` — with **no policies**,
+which is deny-all for `anon` and `authenticated`. That is the intent: nothing
+reads this database through PostgREST. The dashboard talks to the Express
+backend on Northflank, and neither `dashboard/src`, `backend/src` nor
+`mobile-app/src` imports `supabase-js` at all (checked before running it).
+
+**Why this does not break the backend**: it connects as the role that ran the
+migrations, so it *owns* these tables, and an owner bypasses RLS unless
+`FORCE ROW LEVEL SECURITY` is set, which it is not. Verified after the change
+rather than assumed — reads *and* a write, because RLS governs both:
+
+        /health /routes/corridors /trucks /incidents /risk/segments   all 200
+        POST /trips -> 4f425fb5, 95.2 km, 296 edges
+        truck still carries its 230-point route (the forecast depends on it)
+
+`routable_edges` was also set to `security_invoker = on`. A view runs with its
+owner's rights by default, so it would otherwise have handed back the very
+`road_edges` rows RLS had just protected.
+
+### The project hosts another application
+
+`pg_tables` returns **33** tables in `public`, not 15. Seventeen belong to
+something else entirely — `Contest`, `DailyPlan`, `FocusSession`, `Task`,
+`TimeCapsule`, `User`, `UserSettings`, `Workout` and friends — and one,
+`Goal`, already had RLS enabled by whoever built it.
+
+Those were deliberately left alone. Enabling RLS on a table whose application
+reads it through the anon or authenticated role, with no policy written for it,
+takes that application offline immediately; `User` and `UserSettings` suggest
+per-user rows that need `auth.uid()`-shaped policies rather than a blanket
+switch. They remain in the advisor's report, and that is the honest state:
+they are not this project's tables to secure.
+
+`spatial_ref_sys` is PostGIS's own, owned by the extension, so `ALTER TABLE`
+on it fails with "must be owner". It holds public SRID definitions and no
+project data; its warning is expected to stay.
+
+---
+
 ## R19 — 2026-09-22 · The SPA fallback R16 took away
 
 `/weather` and `/analytics` returned Vercel's **404 NOT_FOUND** on the deployed
