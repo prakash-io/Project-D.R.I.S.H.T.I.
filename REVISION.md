@@ -162,6 +162,25 @@ rather than assumed — reads *and* a write, because RLS governs both:
 owner's rights by default, so it would otherwise have handed back the very
 `road_edges` rows RLS had just protected.
 
+### New tables are now protected by default
+
+Supabase's own helper (Database → Tables → "Set up trigger") installs an event
+trigger, reviewed before it was created rather than accepted on trust:
+
+        ensure_rls  ddl_command_end  enabled
+        CREATE TABLE, CREATE TABLE AS, SELECT INTO
+        rls_auto_enable   security_definer = true
+
+It loops `pg_event_trigger_ddl_commands()` for those tags on `table` and
+`partitioned table`, restricted to schema `public`, runs `alter table if
+exists … enable row level security`, and wraps the lot in `EXCEPTION WHEN
+OTHERS` so a failure can never break someone's `CREATE TABLE`. It acts on
+**newly created** tables only; confirmed by re-counting afterwards — still 15
+true / 18 false, exactly as before.
+
+It is database-wide, not ours alone: tables the other application creates here
+in future will get RLS too, and will then need policies of their own.
+
 ### The project hosts another application
 
 `pg_tables` returns **33** tables in `public`, not 15. Seventeen belong to
